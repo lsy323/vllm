@@ -14,7 +14,7 @@ if "VLLM_TORCH_COMPILE_LEVEL" not in os.environ:
 assert envs.VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.INDUCTOR,\
      "TPU does not support Inductor."
 
-set_torch_compile_backend("openxla")
+# set_torch_compile_backend("openxla")
 
 
 class TpuPlatform(Platform):

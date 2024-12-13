@@ -273,7 +273,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 m = xm.get_memory_info(xm.xla_device())
                 logger.info(f"bytes_used = {m['bytes_used'] / 1024 / 1024 / 1024}, bytes_limit = {m['bytes_limit'] / 1024 / 1024 / 1024}, peak_bytes_used = {m['peak_bytes_used'] / 1024 / 1024 / 1024}")
                 import torch_xla
-                logger.info(f"print live tensor info:{torch_xla._XLAC._xla_tensors_report(0, str(xm.xla_device()))}")
+                # logger.info(f"print live tensor info:{torch_xla._XLAC._xla_tensors_report(0, str(xm.xla_device()))}")
 
                 if seq_len >= self.model_config.max_model_len:
                     break
@@ -295,7 +295,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             self._dummy_run(batch_size, seq_len, kv_caches, is_prompt=False)
             xm.wait_device_ops()
             logger.info("batch_size: %d, seq_len: %d", batch_size, seq_len)
-            logger.info(f"print live tensor info:{torch_xla._XLAC._xla_tensors_report(0, str(xm.xla_device()))}")
+            # logger.info(f"print live tensor info:{torch_xla._XLAC._xla_tensors_report(0, str(xm.xla_device()))}")
             if batch_size >= self.scheduler_config.max_num_seqs:
                 break
             batch_size = batch_size + 16 if batch_size >= 16 else batch_size * 2
@@ -693,10 +693,11 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
 
     def __init__(self, model: nn.Module):
         self.model = model
-        compiled_callable = torch.compile(self.forward,
-                                          backend="openxla",
-                                          fullgraph=True,
-                                          dynamic=False)
+        # compiled_callable = torch.compile(self.forward,
+        #                                   backend="openxla",
+        #                                   fullgraph=True,
+        #                                   dynamic=False)
+        compiled_callable = self.forward
         super().__init__(compiled_callable)
 
     def __call__(self, *args, is_prompt: bool, **kwargs):

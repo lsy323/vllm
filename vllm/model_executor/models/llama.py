@@ -265,7 +265,8 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-        return hidden_states, residual
+        # return hidden_states, residual
+        return hidden_states
 
 
 @support_torch_compile(
@@ -342,11 +343,42 @@ class LlamaModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        
+        class wrapper(torch.nn.Module):
+            def __init__(self, decoder_layer, positions, k_cache, v_cache, attn_metadata):
+                super().__init__()
+                self.decoder_layer = decoder_layer
+                self.positions = torch.nn.Buffer(positions)
+                # self.kv_caches = torch.nn.Buffer(kv_caches)
+                self.k_cache = torch.nn.Buffer(k_cache)
+                self.v_cache = torch.nn.Buffer(v_cache)
+                self.slot_mapping = torch.nn.Buffer(attn_metadata.slot_mapping)
+                self.attn_metadata = attn_metadata
+
+            def forward(self, hidden_states):
+                self.attn_metadata.slot_mapping = self.slot_mapping
+                hidden_states = self.decoder_layer(self.positions,
+                                               hidden_states,
+                                               (self.k_cache, self.v_cache),
+                                               self.attn_metadata, None)
+                return hidden_states
+
+        layers = self.layers[self.start_layer : self.end_layer]
+        wrappers = []
         for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
-            hidden_states, residual = layer(positions, hidden_states,
-                                            kv_caches[i - self.start_layer],
-                                            attn_metadata, residual)
+            wrappers.append(wrapper(self.layers[i], positions,
+                                    kv_caches[i - self.start_layer][0],
+                                    kv_caches[i - self.start_layer][1],
+                                    attn_metadata))
+        from torch_xla.experimental.scan_layers import scan_layers
+        hidden_states = scan_layers(wrappers, hidden_states)
+        
+        
+        # for i in range(self.start_layer, self.end_layer):
+        #     layer = self.layers[i]
+        #     hidden_states, residual = layer(positions, hidden_states,
+        #                                     kv_caches[i - self.start_layer],
+        #                                     attn_metadata, residual)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -354,7 +386,8 @@ class LlamaModel(nn.Module):
                 "residual": residual
             })
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        # hidden_states, _ = self.norm(hidden_states, residual)
+        hidden_states = self.norm(hidden_states, residual)
         return hidden_states
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
