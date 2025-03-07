@@ -152,6 +152,9 @@ def _support_torch_compile(
         self.vllm_config = vllm_config
         # for CompilationLevel.DYNAMO_AS_IS , the upper level model runner
         # will handle the compilation, so we don't need to do anything here.
+        print(
+            f"vllm_config.compilation_config.level is {vllm_config.compilation_config.level}"
+        )
         self.do_not_compile = \
             vllm_config.compilation_config.level in [
             CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS
@@ -207,6 +210,7 @@ def _support_torch_compile(
         # compiled function and let torch.compile handle the dispatching,
         # with the overhead of guard evaluation and recompilation.
         if len(self.compiled_codes) < 1 or not self.use_custom_dispatcher:
+            print("not skip dynamo guard")
             # it seems Dynamo reuse the compilation across instances,
             # while we need to make sure the compiled code is not reused.
             # we need to control all the compilation of the model.
@@ -242,6 +246,7 @@ def _support_torch_compile(
         # dispatch to the compiled code directly, without going through
         # the Dynamo guard mechanism.
         with self.dispatch_to_code(0):
+            print("skip dynamo guard 2")
             model_output = self.forward(*args, **kwargs)
             return model_output
 

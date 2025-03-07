@@ -45,7 +45,7 @@ class TorchCompileWrapperWithCustomDispatcher:
                 self.forward,
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
                 backend=backend)
-
+            print(f"backend = {backend}")
         self.compiled_callable = compiled_callable
         self.original_code_object = self.__class__.forward.__code__
         self.compiled_codes: List[CodeType] = []

@@ -672,10 +672,11 @@ class TPUModelRunner:
         xm.mark_step()
         xm.wait_device_ops()
         model = ModelWrapperV1(model)
-        self.model = torch.compile(model,
-                                   backend="openxla",
-                                   fullgraph=True,
-                                   dynamic=False)
+        self.model = model
+        # self.model = torch.compile(model,
+        #                            backend="openxla",
+        #                            fullgraph=True,
+        #                            dynamic=False)
 
     def _dummy_run(
         self,
@@ -745,6 +746,7 @@ class TPUModelRunner:
 
         start = time.perf_counter()
         num_tokens = 16
+        self.max_num_tokens = 32  # Faster compilation
         while True:
             self._dummy_run(self.kv_caches, num_tokens)
             logger.info("  -- num_tokens: %d", num_tokens)
