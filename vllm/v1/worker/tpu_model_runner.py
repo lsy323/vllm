@@ -448,6 +448,7 @@ class TPUModelRunner:
         padded_num_reqs = _get_padded_num_reqs_with_upper_limit(
             num_reqs, self.max_num_reqs)
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
+        logger.info(f"check logits_indices shape {logits_indices.shape}")
         logits_indices = logits_indices.to(self.device)
         return attn_metadata, logits_indices
 
@@ -586,6 +587,8 @@ class TPUModelRunner:
                 inputs_embeds=inputs_embeds,
             )
         num_reqs = self.input_batch.num_reqs
+        logger.info(f"hidden states shape: {hidden_states.shape}")
+        logger.info(f"num reqs: {num_reqs}")
         selected_token_ids = self.model.compute_logits(hidden_states,
                                                        logits_indices, None)
         selected_token_ids = selected_token_ids.cpu()[:num_reqs]
@@ -847,15 +850,26 @@ class ModelWrapperV1(nn.Module):
         return hidden_states
 
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    def _select_hidden_states(self, hidden_states, logits_indices):
+        return hidden_states[logits_indices]
+
+    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    def _compute_logits(self, hidden_states, sampling_metadata):
+        logits = self.model.compute_logits(hidden_states, sampling_metadata)
+        selected_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
+        return selected_token_ids
+
+    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
         logits_indices: torch.Tensor,
         sampling_metadata,
     ) -> Optional[torch.Tensor]:
-        hidden_states = hidden_states[logits_indices]
-        logits = self.model.compute_logits(hidden_states, sampling_metadata)
-        selected_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
+        hidden_states = self._select_hidden_states(hidden_states,
+                                                   logits_indices)
+        selected_token_ids = self._compute_logits(hidden_states,
+                                                  sampling_metadata)
         return selected_token_ids
 
     def get_multimodal_embeddings(self, *args, **kwargs):
