@@ -782,12 +782,16 @@ class TPUModelRunner:
         start = time.perf_counter()
         num_tokens = 16
         while True:
-            self._dummy_run(self.kv_caches, num_tokens, num_tokens
-                            >= self.max_num_tokens)
+            is_last_run = num_tokens >= self.max_num_tokens
+            # Only warm up the logits computing and sampling graph
+            # in the last warm up run to avoid duplicated warm ups.
+            self._dummy_run(self.kv_caches,
+                            num_tokens,
+                            warm_up_compute_logits_and_sampling=is_last_run)
             logger.info("  -- num_tokens: %d", num_tokens)
             xm.mark_step()
             xm.wait_device_ops()
-            if num_tokens >= self.max_num_tokens:
+            if is_last_run:
                 break
             num_tokens *= 2
         end = time.perf_counter()
