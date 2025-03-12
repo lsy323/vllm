@@ -683,6 +683,7 @@ class TPUModelRunner:
         self,
         kv_caches,
         num_tokens: int,
+        warm_up_compute_logits_and_sampling: bool,
     ) -> None:
         if self.is_multimodal_model:
             input_ids = None
@@ -751,9 +752,23 @@ class TPUModelRunner:
                     dtype=torch.int32,
                     device=self.device,
                 )
+                logger.info(
+                    f"in warm up, hidden state shape: {hidden_states.shape}")
+                logger.info(
+                    f"in warm up, logits_indices shape: {logits_indices.shape}"
+                )
                 torch._dynamo.mark_dynamic(hidden_states, 0)
                 torch._dynamo.mark_dynamic(logits_indices, 0)
-                self.model.compute_logits(hidden_states, logits_indices, None)
+                selected_hidden_states = self.model.select_hidden_states(
+                    hidden_states, logits_indices)
+                logger.info(
+                    f"in warm up, selected_hidden_states shape: {selected_hidden_states.shape}"
+                )
+                if warm_up_compute_logits_and_sampling:
+                    logger.info("warm up sampling")
+                    torch._dynamo.mark_dynamic(selected_hidden_states, 0)
+                    self.model.compute_logits_and_sampling(
+                        selected_hidden_states, None)
                 if num_reqs >= self.max_num_reqs:
                     break
                 num_reqs = _get_padded_num_reqs_with_upper_limit(
@@ -767,7 +782,8 @@ class TPUModelRunner:
         start = time.perf_counter()
         num_tokens = 16
         while True:
-            self._dummy_run(self.kv_caches, num_tokens)
+            self._dummy_run(self.kv_caches, num_tokens, num_tokens
+                            >= self.max_num_tokens)
             logger.info("  -- num_tokens: %d", num_tokens)
             xm.mark_step()
             xm.wait_device_ops()
@@ -850,11 +866,12 @@ class ModelWrapperV1(nn.Module):
         return hidden_states
 
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
-    def _select_hidden_states(self, hidden_states, logits_indices):
-        return hidden_states[logits_indices]
+    def select_hidden_states(self, hidden_states, logits_indices):
+        hidden_states = hidden_states[logits_indices]
+        return hidden_states
 
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
-    def _compute_logits(self, hidden_states, sampling_metadata):
+    def compute_logits_and_sampling(self, hidden_states, sampling_metadata):
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
         selected_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
         return selected_token_ids
@@ -866,10 +883,10 @@ class ModelWrapperV1(nn.Module):
         logits_indices: torch.Tensor,
         sampling_metadata,
     ) -> Optional[torch.Tensor]:
-        hidden_states = self._select_hidden_states(hidden_states,
-                                                   logits_indices)
-        selected_token_ids = self._compute_logits(hidden_states,
-                                                  sampling_metadata)
+        hidden_states = self.select_hidden_states(hidden_states,
+                                                  logits_indices)
+        selected_token_ids = self.compute_logits_and_sampling(
+            hidden_states, sampling_metadata)
         return selected_token_ids
 
     def get_multimodal_embeddings(self, *args, **kwargs):

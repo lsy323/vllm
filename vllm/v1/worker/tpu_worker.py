@@ -141,6 +141,7 @@ class TPUWorker:
         self.model_runner._dummy_run(
             runner_kv_caches,
             num_tokens=self.scheduler_config.max_num_batched_tokens,
+            warm_up_compute_logits_and_sampling=True,
         )
 
         # Synchronize before measuring the memory usage.
