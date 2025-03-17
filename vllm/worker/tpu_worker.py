@@ -78,7 +78,8 @@ class TPUWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
         # Set random seed.
         set_random_seed(self.model_config.seed)
-        xm.set_rng_state(self.model_config.seed, self.device)
+        if isinstance(self.model_config.seed, int):
+            xm.set_rng_state(self.model_config.seed, self.device)
 
         # Increase the cache size limit, which is the maximum number of
         # dynamo graphs that can be compiled.
