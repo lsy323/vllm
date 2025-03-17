@@ -86,8 +86,10 @@ class TorchCompileWrapperWithCustomDispatcher:
         if frame.f_locals["self"] is not self:
             return
 
+        logger.info("save compiled codes")
         self.compiled_codes.append(new_code)
         local_cache_dir = self.vllm_config.compilation_config.local_cache_dir
+        local_cache_dir = '/tmp/dynamo_cache'
         if isinstance(local_cache_dir, str):
             decompiled_file = os.path.join(local_cache_dir,
                                            "transformed_code.py")
@@ -97,6 +99,7 @@ class TorchCompileWrapperWithCustomDispatcher:
                     # as we guarantee a full-graph compilation in Dynamo.
                     # but there's no 100% guarantee, since decompliation is
                     # not a reversible process.
+                    logger.info("try to decompile dynamo")
                     import depyf
                     src = depyf.decompile(new_code)
                     with open(decompiled_file, "w") as f:
@@ -105,6 +108,7 @@ class TorchCompileWrapperWithCustomDispatcher:
                     logger.debug("Dynamo transformed code saved to %s",
                                  decompiled_file)
                 except Exception:
+                    logger.info("decompile dynamo failed")
                     pass
 
         if self.vllm_config.compilation_config.use_cudagraph and \

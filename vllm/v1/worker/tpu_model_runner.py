@@ -13,7 +13,8 @@ import torch_xla.runtime as xr
 
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
-from vllm.config import VllmConfig
+from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
+from vllm.config import VllmConfig, CompilationLevel, get_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
@@ -670,11 +671,11 @@ class TPUModelRunner:
         model = model.eval()
         xm.mark_step()
         xm.wait_device_ops()
-        model = ModelWrapperV1(model)
-        self.model = torch.compile(model,
-                                   backend="openxla",
-                                   fullgraph=True,
-                                   dynamic=False)
+        self.model = ModelWrapperV1(model)
+        # self.model = torch.compile(model,
+        #                            backend="openxla",
+        #                            fullgraph=True,
+        #                            dynamic=False)
 
     def _dummy_run(
         self,
@@ -730,12 +731,14 @@ class TPUModelRunner:
 
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             assert self.model is not None
+            logger.info("before model run")
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=position_ids,
                 kv_caches=kv_caches,
                 inputs_embeds=inputs_embeds,
             )
+            logger.info("after model run")
             num_reqs = _get_padded_num_reqs_with_upper_limit(
                 64, self.max_num_reqs)
             # NOTE(chengjiyao): In total, the compute_logits function utilizes a
@@ -813,11 +816,14 @@ class TPUModelRunner:
             self.kv_caches)
 
 
-class ModelWrapperV1(nn.Module):
+class ModelWrapperV1(TorchCompileWrapperWithCustomDispatcher):
 
     def __init__(self, model: nn.Module):
         super().__init__()
         self.model = model
+        compiled_callable = torch.compile(self.forward, backend="openxla", fullgraph=True, dynamic=False)
+        super().__init__(compiled_callable,
+                         compilation_level=get_current_vllm_config().compilation_config.level)
 
     def forward(
         self,
@@ -836,8 +842,6 @@ class ModelWrapperV1(nn.Module):
             inputs_embeds: The input embeddings of shape [num_tokens,
                 hidden_size]. It is used for multimodal models.
         """
-
-        assert self.model is not None
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
@@ -845,8 +849,24 @@ class ModelWrapperV1(nn.Module):
         )
 
         return hidden_states
+    
+    def __call__(self,
+                 input_ids: torch.Tensor,
+                 positions: torch.Tensor,
+                 kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
+                 inputs_embeds: Optional[torch.Tensor] = None,):
+        # print(len(self.compiled_codes))
+        # return self.compiled_callable(input_ids, positions, kv_caches, inputs_embeds)
+        # return self.forward(input_ids, positions, kv_caches, inputs_embeds)
+        if len(self.compiled_codes) > 2:
+            dispatch_id = 0 if kv_caches is None else 2
+            # print(f"dispatch_id {dispatch_id}")
+            with self.dispatch_to_code(dispatch_id):
+                return self.forward(input_ids, positions, kv_caches, inputs_embeds)
+        else:
+            return self.compiled_callable(input_ids, positions, kv_caches, inputs_embeds)
 
-    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
