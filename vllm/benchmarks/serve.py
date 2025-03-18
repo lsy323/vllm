@@ -807,6 +807,8 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
 
 def main(args: argparse.Namespace):
+    import torch_xla.debug.profiler as xp
+    profiler = xp.start_server(9012)
     print(args)
     random.seed(args.seed)
     np.random.seed(args.seed)

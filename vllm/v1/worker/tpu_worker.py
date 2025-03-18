@@ -66,14 +66,14 @@ class TPUWorker:
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
-        self.profiler = None
+        # self.profiler = None
         if envs.VLLM_TORCH_PROFILER_DIR and self.rank < 1:
-            # For TPU, we can only have 1 active profiler session for 1 profiler
-            # server. So we only profile on rank0.
+        #     # For TPU, we can only have 1 active profiler session for 1 profiler
+        #     # server. So we only profile on rank0.
             self.profile_dir = envs.VLLM_TORCH_PROFILER_DIR
-            logger.info("Profiling enabled. Traces will be saved to: %s",
-                        self.profile_dir)
-            self.profiler = xp.start_server(9012)
+        #     logger.info("Profiling enabled. Traces will be saved to: %s",
+        #                 self.profile_dir)
+        #     self.profiler = xp.start_server(9012)
 
         if self.model_config.seed is None:
             self.model_config.seed = 0
@@ -168,8 +168,8 @@ class TPUWorker:
 
     def profile(self, is_start: bool = True):
         if self.rank < 1:
-            if self.profiler is None:
-                raise RuntimeError("Profiler is not enabled.")
+            # if self.profiler is None:
+            #     raise RuntimeError("Profiler is not enabled.")
             if is_start:
                 xp.start_trace(self.profile_dir)
             else:
