@@ -31,7 +31,8 @@ class TorchCompileWrapperWithCustomDispatcher:
 
     def __init__(self,
                  compiled_callable: Optional[Callable] = None,
-                 compilation_level: int = 0):
+                 compilation_level: int = 0,
+                 register_hook: bool = True):
 
         vllm_config = get_current_vllm_config()
         self.vllm_config = vllm_config
@@ -74,6 +75,11 @@ class TorchCompileWrapperWithCustomDispatcher:
             return
         # code borrowed from https://github.com/thuml/depyf/blob/f4ad79fadee27ea113b4c75202db1eb1a11c0dbc/depyf/explain/enable_debugging.py#L25
         frame = sys._getframe()
+        # logger.info(f"check frame")
+        # tmp_frame = frame
+        # while tmp_frame is not None:
+        #     logger.info(f"Frame: {tmp_frame}")
+        #     tmp_frame = tmp_frame.f_back
         while frame and frame.f_back:
             frame = frame.f_back
             code_name = frame.f_code.co_name
@@ -97,6 +103,7 @@ class TorchCompileWrapperWithCustomDispatcher:
                     # as we guarantee a full-graph compilation in Dynamo.
                     # but there's no 100% guarantee, since decompliation is
                     # not a reversible process.
+                    logger.info("try to decompile dynamo")
                     import depyf
                     src = depyf.decompile(new_code)
                     with open(decompiled_file, "w") as f:
@@ -105,6 +112,7 @@ class TorchCompileWrapperWithCustomDispatcher:
                     logger.debug("Dynamo transformed code saved to %s",
                                  decompiled_file)
                 except Exception:
+                    logger.info("decompile dynamo failed")
                     pass
 
         if self.vllm_config.compilation_config.use_cudagraph and \

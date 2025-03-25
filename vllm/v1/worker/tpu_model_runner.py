@@ -13,7 +13,8 @@ import torch_xla.runtime as xr
 
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
-from vllm.config import VllmConfig
+from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
@@ -428,22 +429,24 @@ class TPUModelRunner:
         self.input_ids_cpu[
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
         self.input_ids = self.input_ids_cpu[:
-                                            padded_total_num_scheduled_tokens].to(
-                                                self.device)
+                                            padded_total_num_scheduled_tokens].contiguous(
+                                            ).to(self.device)
         self.position_ids = self.positions_cpu[:
-                                               padded_total_num_scheduled_tokens].to(
-                                                   self.device)
+                                               padded_total_num_scheduled_tokens].contiguous(
+                                               ).to(self.device)
         self.slot_mapping_cpu[total_num_scheduled_tokens:] = _PAD_SLOT_ID
         slot_mapping = self.slot_mapping_cpu[:
-                                             padded_total_num_scheduled_tokens].to(
-                                                 self.device)
+                                             padded_total_num_scheduled_tokens].contiguous(
+                                             ).to(self.device)
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
             self.input_batch.block_table.get_cpu_tensor()[:num_reqs])
-        block_tables = block_tables.to(self.device)
-        query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1].to(
+        block_tables = block_tables.contiguous().to(self.device)
+        query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs +
+                                                   1].contiguous().to(
+                                                       self.device)
+        seq_lens = self.seq_lens_cpu[:self.max_num_reqs].contiguous().to(
             self.device)
-        seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
 
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
@@ -464,7 +467,7 @@ class TPUModelRunner:
         # Indices at which we sample (positions of last token in the sequence).
         # Padded to avoid recompiling when `num_reqs` varies.
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
-        logits_indices = logits_indices.to(self.device)
+        logits_indices = logits_indices.contiguous().to(self.device)
         return attn_metadata, logits_indices
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
@@ -602,10 +605,10 @@ class TPUModelRunner:
                                     num_reqs, self.device)
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config):
-            hidden_states = self.model(
+            hidden_states = self.bare_model(
                 input_ids=input_ids,
                 positions=self.position_ids,
-                kv_caches=self.kv_caches,
+                intermediate_tensors=self.kv_caches,
                 inputs_embeds=inputs_embeds,
             )
         selected_token_ids = self.model.sample_from_hidden(
@@ -692,13 +695,15 @@ class TPUModelRunner:
                 return_value=xm_tp_rank):
             model = get_model(vllm_config=self.vllm_config)
         model = model.eval()
+        self.bare_model = model
         xm.mark_step()
         xm.wait_device_ops()
-        model = ModelWrapperV1(model)
-        self.model = torch.compile(model,
-                                   backend="openxla",
-                                   fullgraph=True,
-                                   dynamic=False)
+        self.model = ModelWrapperV1(model)
+        
+        # self.model = torch.compile(model,
+        #                            backend="openxla",
+        #                            fullgraph=True,
+        #                            dynamic=False)
 
     @torch.no_grad()
     def _dummy_run(self, kv_caches, num_tokens: int) -> None:
@@ -750,7 +755,7 @@ class TPUModelRunner:
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
         with set_forward_context(attn_metadata, self.vllm_config, 0):
-            self.model(input_ids=input_ids,
+            self.bare_model(input_ids=input_ids,
                        positions=position_ids,
                        kv_caches=kv_caches,
                        inputs_embeds=inputs_embeds)
@@ -850,12 +855,16 @@ class TPUModelRunner:
             self.kv_caches)
 
 
-class ModelWrapperV1(nn.Module):
+class ModelWrapperV1(TorchCompileWrapperWithCustomDispatcher):
 
     def __init__(self, model: nn.Module):
         super().__init__()
         self.model = model
         self.sampler = TPUSampler()
+        compiled_callable = torch.compile(self.forward, backend="openxla", fullgraph=True, dynamic=False)
+        super().__init__(compiled_callable,
+                         compilation_level=get_current_vllm_config().
+                         compilation_config.level)
 
     def sample(
             self, logits: torch.Tensor,
@@ -888,6 +897,26 @@ class ModelWrapperV1(nn.Module):
         )
 
         return hidden_states
+
+    def __call__(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ):
+        # print(len(self.compiled_codes))
+        # return self.compiled_callable(input_ids, positions, kv_caches, inputs_embeds)
+        # return self.forward(input_ids, positions, kv_caches, inputs_embeds)
+        if len(self.compiled_codes) > 2:
+            dispatch_id = 0 if kv_caches is None else 2
+            # print(f"dispatch_id {dispatch_id}")
+            with self.dispatch_to_code(dispatch_id):
+                return self.forward(input_ids, positions, kv_caches,
+                                    inputs_embeds)
+        else:
+            return self.compiled_callable(input_ids, positions, kv_caches,
+                                          inputs_embeds)
 
     def sample_from_hidden(
         self,

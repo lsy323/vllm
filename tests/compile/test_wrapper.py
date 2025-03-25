@@ -20,7 +20,7 @@ class MyWrapper(TorchCompileWrapperWithCustomDispatcher):
 
     def __init__(self, model):
         self.model = model
-        compiled_callable = torch.compile(self.forward, backend="eager")
+        compiled_callable = torch.compile(self.forward, backend="openxla", fullgraph=True, dynamic=False)
         super().__init__(compiled_callable,
                          compilation_level=CompilationLevel.DYNAMO_ONCE)
 
@@ -29,13 +29,14 @@ class MyWrapper(TorchCompileWrapperWithCustomDispatcher):
         return self.model(x, cache)
 
     def __call__(self, x: torch.Tensor, cache: Optional[torch.Tensor] = None):
+        print(len(self.compiled_codes))
         # let torch.compile compile twice
-        if len(self.compiled_codes) == 2:
-            dispatch_id = 0 if cache is None else 1
-            with self.dispatch_to_code(dispatch_id):
-                return self.forward(x, cache)
-        else:
-            return self.compiled_callable(x, cache)
+        # if len(self.compiled_codes) == 2:
+        #     dispatch_id = 0 if cache is None else 1
+        #     with self.dispatch_to_code(dispatch_id):
+        #         return self.forward(x, cache)
+        # else:
+        return self.compiled_callable(x, cache)
 
 
 def test_torch_compile_wrapper():
@@ -61,3 +62,5 @@ def test_torch_compile_wrapper():
     for wrapper in wrappers:
         # make sure they have independent compiled codes
         assert len(wrapper.compiled_codes) == 2
+
+test_torch_compile_wrapper()

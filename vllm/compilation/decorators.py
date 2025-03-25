@@ -171,6 +171,7 @@ def _support_torch_compile(
         if self.do_not_compile or torch.compiler.is_compiling():
             return self.forward(*args, **kwargs)
 
+        print(f"check len {len(self.compiled_codes)}")
         # the first compilation needs to have dynamic shapes marked
         if len(self.compiled_codes) < 1:
             sig = inspect.signature(self.__class__.forward)
