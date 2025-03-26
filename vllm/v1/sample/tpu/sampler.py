@@ -62,6 +62,7 @@ class Sampler(nn.Module):
         sampling_metadata: TPUSupportedSamplingMetadata,
     ) -> torch.Tensor:
         greedy_sampled = self.greedy_sample(logits)
+        return greedy_sampled
 
         assert sampling_metadata.temperature is not None
 

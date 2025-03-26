@@ -175,6 +175,7 @@ class TPUModelRunner:
             min_token_size=16,
             max_token_size=self.max_num_tokens,
             padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
+        logger.info(f"check num_tokens_paddings {self.num_tokens_paddings}")
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> bool:
         """Update the cached states and the persistent batch with the scheduler
@@ -426,8 +427,12 @@ class TPUModelRunner:
             num_scheduled_tokens_per_req)
 
         # Do the padding and copy the tensors to the TPU.
-        padded_total_num_scheduled_tokens = _get_padded_token_len(
-            self.num_tokens_paddings, total_num_scheduled_tokens)
+        # padded_total_num_scheduled_tokens = _get_padded_token_len(
+        #     self.num_tokens_paddings, total_num_scheduled_tokens)
+        padded_total_num_scheduled_tokens = _get_padded_token_len2(
+            total_num_scheduled_tokens)
+        logger.info(f"check total_num_scheduled_tokens {total_num_scheduled_tokens}")
+        logger.info(f"check padded_total_num_scheduled_tokens {padded_total_num_scheduled_tokens}")
         # Zero out to avoid spurious values from prev iteration (last cp chunk)
         self.input_ids_cpu[
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
@@ -468,6 +473,7 @@ class TPUModelRunner:
         # Indices at which we sample (positions of last token in the sequence).
         # Padded to avoid recompiling when `num_reqs` varies.
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
+        logger.info(f"check logits_indices {logits_indices}")
         logits_indices = logits_indices.to(self.device)
         return attn_metadata, logits_indices
 
@@ -609,6 +615,7 @@ class TPUModelRunner:
                 kv_caches=self.kv_caches,
                 inputs_embeds=inputs_embeds,
             )
+        logger.info(f"check hidden_states {hidden_states}")
         selected_token_ids = self.model.sample_from_hidden(
             hidden_states, tpu_sampling_metadata)
         # Remove padding on cpu and keep dynamic op outside of xla graph.
@@ -664,6 +671,7 @@ class TPUModelRunner:
                     i, target_slice] = valid_sampled_token_ids[i]
                 req_state.output_token_ids.extend(valid_sampled_token_ids[i])
 
+        logger.info(f"check valid_sampled_token_ids {valid_sampled_token_ids}")
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -768,21 +776,28 @@ class TPUModelRunner:
         logger.info("Compiling the model with different input shapes.")
 
         start = time.perf_counter()
-        for num_tokens in self.num_tokens_paddings:
+        num_tokens = 16
+        while True:
+            # for num_tokens in self.num_tokens_paddings:
             logger.info("  -- num_tokens: %d", num_tokens)
             self._dummy_run(self.kv_caches, num_tokens)
             xm.mark_step()
+            if num_tokens >= self.max_num_tokens:
+                break
+            num_tokens *= 2
         xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in in %.2f [secs].", end - start)
 
         logger.info("Compiling sampling with different input shapes.")
         start = time.perf_counter()
+        num_tokens = 16
         hsize = self.model_config.get_hidden_size()
         device = self.device
         # Compile sampling step for different model+sampler outputs in bucketed
         # n_tokens x max_num_reqs. Graph is really small so this is fine.
-        for num_tokens in self.num_tokens_paddings:
+        # for num_tokens in self.num_tokens_paddings:
+        while True:
             num_reqs_to_sample = MIN_NUM_SEQS
             dummy_hidden = torch.randn((num_tokens, hsize),
                                        device=device,
@@ -794,6 +809,8 @@ class TPUModelRunner:
                     device=device,
                 )
                 xm.mark_step()
+                if num_tokens >= self.max_num_tokens:
+                    break
                 sampling_meta = TPUSupportedSamplingMetadata.\
                     from_input_batch(self.input_batch, indices)
                 logger.info("  -- num_tokens: %d, num_seqs: %d", num_tokens,
@@ -804,6 +821,9 @@ class TPUModelRunner:
                 if num_reqs_to_sample >= self.max_num_reqs:
                     break
                 num_reqs_to_sample *= 2
+            if num_tokens >= self.max_num_tokens:
+                break
+            num_tokens *= 2
         xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in in %.2f [secs].", end - start)
@@ -906,6 +926,7 @@ class ModelWrapperV1(nn.Module):
         Sample with xla-friendly function. This function is to be traced 
         separately from `forward` for lighter compilation overhead.
         """
+        logger.info(f"check indices do sample {sampling_metadata.indices_do_sample}")
         # Tensor `sample_hidden_states` is of fixed pre-compiled size.
         sample_hidden_states = \
             hidden_states[sampling_metadata.indices_do_sample]
@@ -965,3 +986,8 @@ def _get_padded_token_len(paddings: list[int], x: int) -> int:
     index = bisect.bisect_left(paddings, x)
     assert index < len(paddings)
     return paddings[index]
+
+def _get_padded_token_len2(x: int) -> int:
+    if x <= 16:
+        return 16
+    return 1 << (x - 1).bit_length()

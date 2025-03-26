@@ -58,4 +58,5 @@ def test_models(
             vllm_outputs = vllm_model.generate_greedy(example_prompts,
                                                       max_tokens)
         output = vllm_outputs[0][1]
+        print(f"{output}")
         assert "1024" in output
