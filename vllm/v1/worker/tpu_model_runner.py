@@ -768,7 +768,7 @@ class TPUModelRunner:
         logger.info("Compiling the model with different input shapes.")
 
         start = time.perf_counter()
-        self.num_tokens_paddings = [128, 256, 512, 1024, 2048]
+        # self.num_tokens_paddings = [128, 256, 512, 1024, 2048]
         for num_tokens in self.num_tokens_paddings:
             logger.info("  -- num_tokens: %d", num_tokens)
             self._dummy_run(self.kv_caches, num_tokens)
@@ -843,12 +843,16 @@ class TPUModelRunner:
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
 
-                    tpu_k_cache = torch.zeros(kv_cache_shape,
+                    # tpu_k_cache = torch.zeros(kv_cache_shape,
+                    #                           dtype=dtype,
+                    #                           device=self.device)
+                    # tpu_v_cache = torch.zeros_like(tpu_k_cache)
+
+                    # kv_caches[layer_name] = (tpu_k_cache, tpu_v_cache)
+                    tpu_kv_cache = torch.zeros(kv_cache_shape,
                                               dtype=dtype,
                                               device=self.device)
-                    tpu_v_cache = torch.zeros_like(tpu_k_cache)
-
-                    kv_caches[layer_name] = (tpu_k_cache, tpu_v_cache)
+                    kv_caches[layer_name] = tpu_kv_cache
                 else:
                     raise NotImplementedError
 
@@ -875,7 +879,8 @@ class ModelWrapperV1(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
+        # kv_caches: list[tuple[torch.Tensor, torch.Tensor]],
+        kv_caches: list[torch.Tensor],
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Executes the forward pass of the model.

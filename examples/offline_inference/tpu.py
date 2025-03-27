@@ -23,7 +23,7 @@ sampling_params = SamplingParams(temperature=0, top_p=1.0, n=N, max_tokens=16)
 #           max_num_seqs=4)
 llm = LLM(model="meta-llama/Meta-Llama-3.1-8B",
           max_num_batched_tokens=512,
-          max_num_seqs=256,
+          max_num_seqs=512,
           max_model_len=2048,
           enforce_eager=False)
 outputs = llm.generate(prompts, sampling_params)
