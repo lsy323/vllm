@@ -163,10 +163,14 @@ class PallasAttentionBackendImpl(AttentionImpl):
             slot_mapping = attn_metadata.slot_mapping
             write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
 
+        num_blocks, block_size, _ = key_cache.shape
+        key_cache = key_cache.reshape(num_blocks, block_size, self.num_kv_heads, self.head_size)
+        value_cache = value_cache.reshape(num_blocks, block_size, self.num_kv_heads, self.head_size)
+        kv = torch.cat([key_cache, value_cache], axis=-1).reshape(
+                   num_blocks, block_size, self.num_kv_heads * 2, self.head_size)
         output = torch.ops.xla.ragged_paged_attention(
             query,
-            key_cache,
-            value_cache,
+            kv,
             attn_metadata.context_lens,
             attn_metadata.block_tables,
             attn_metadata.query_start_loc,
