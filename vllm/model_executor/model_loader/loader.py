@@ -450,7 +450,10 @@ class DefaultModelLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 model = _initialize_model(vllm_config=vllm_config)
-
+            model = model.to(target_device)
+            import torch_xla.core.xla_model as xm
+            xm.mark_step()
+            xm.wait_device_ops()
             weights_to_load = {name for name, _ in model.named_parameters()}
             loaded_weights = model.load_weights(
                 self._get_all_weights(model_config, model))

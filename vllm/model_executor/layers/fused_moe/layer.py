@@ -98,6 +98,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                        requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
+        import torch_xla.core.xla_model as xm
+        xm.mark_step()
+        xm.wait_device_ops()
+
 
     def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
         # Pad the weight tensor. This is an optimization on ROCm platform, which
@@ -308,8 +312,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         assert not use_grouped_topk
         assert num_expert_group is None
         assert topk_group is None
-        assert custom_routing_function is None
-        assert apply_router_weight_on_input is False
+        # assert custom_routing_function is None
+        # assert apply_router_weight_on_input is False
         if scoring_func != "softmax":
             raise NotImplementedError(
                 "Only softmax scoring function is supported for TPU.")

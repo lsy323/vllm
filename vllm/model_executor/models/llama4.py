@@ -27,6 +27,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
@@ -40,6 +41,8 @@ from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, extract_layer_index,
                     is_pp_missing_parameter)
 
+
+logger = init_logger(__name__)
 
 class Llama4MoE(nn.Module):
 
@@ -418,7 +421,14 @@ class Llama4Model(LlamaModel):
             num_experts=1)
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
+        import torch_xla.core.xla_model as xm
+        device = xm.xla_device()
+        logger.info(f"check device llama4 model {device}")
+        m = xm.get_memory_info(device)
+        print(m)
         for name, loaded_weight in weights:
+            m = xm.get_memory_info(device)
+            logger.info(f"in llama4Model, load_weights name {name}, {m}")
             if "experts.gate_up_proj" in name or "experts.down_proj" in name:
                 fused_experts_params = True
                 expert_params_mapping = expert_params_mapping_fused
@@ -497,10 +507,22 @@ class Llama4ForCausalLM(LlamaForCausalLM):
             skip_prefixes=(["lm_head."]
                            if self.config.tie_word_embeddings else None),
         )
-        weights = [
-            self.permute_qk_weight_for_rotary(name, loaded_weight)
-            for name, loaded_weight in weights
-        ]
+        weights = []
+        import torch_xla.core.xla_model as xm
+        device = xm.xla_device()
+        logger.info(f"check device causallm {device}")
+        m = xm.get_memory_info(device)
+        print(m)
+        
+        for name, loaded_weight in weights:
+            weights.append(self.permute_qk_weight_for_rotary(name, loaded_weight))
+            m = xm.get_memory_info(device)
+            print(m)
+            
+        # weights = [
+        #     self.permute_qk_weight_for_rotary(name, loaded_weight)
+        #     for name, loaded_weight in weights
+        # ]
         return loader.load_weights(weights)
 
     def permute_qk_weight_for_rotary(
@@ -512,9 +534,16 @@ class Llama4ForCausalLM(LlamaForCausalLM):
         def permute(w: torch.Tensor, n_heads: int):
             attn_in = self.config.head_dim * n_heads
             attn_out = self.config.hidden_size
-
-            return w.view(n_heads, attn_in // n_heads // 2, 2,
-                          attn_out).transpose(1, 2).reshape(attn_in, attn_out)
+            if w.device.type != 'cpu':
+                device = w.device
+                w = w.cpu()
+                w = w.view(n_heads, attn_in // n_heads // 2, 2,
+                               attn_out).transpose(1, 2).reshape(attn_in, attn_out)
+                w = w.to(device)
+                return w
+            else:
+                return w.view(n_heads, attn_in // n_heads // 2, 2,
+                            attn_out).transpose(1, 2).reshape(attn_in, attn_out)
 
         modules = name.split(".")
 
