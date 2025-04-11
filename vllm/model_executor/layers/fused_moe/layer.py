@@ -328,7 +328,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                                 gating_output=router_logits,
                                 global_num_experts=global_num_experts,
                                 expert_map=expert_map,
-                                renormalize=renormalize)
+                                renormalize=renormalize,
+                                apply_router_weight_on_input=apply_router_weight_on_input,
+                                custom_routing_function=custom_routing_function)
 
     forward_native = forward_tpu if current_platform.is_tpu() else forward_cuda
 

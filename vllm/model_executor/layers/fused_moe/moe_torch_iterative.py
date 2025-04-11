@@ -13,6 +13,8 @@ def fused_moe(
     global_num_experts: int,
     expert_map: torch.Tensor = None,
     renormalize: bool = False,
+    apply_router_weight_on_input: bool = False,
+    custom_routing_function=None
 ) -> torch.Tensor:
     """
     Args:
@@ -31,10 +33,13 @@ def fused_moe(
 
     hidden_states = hidden_states.view(num_tokens, hidden_size)
     gating_output = gating_output.view(num_tokens, global_num_experts)
-    topk_weights = gating_output.softmax(dim=-1, dtype=torch.float)
-    topk_weights, selected_experts = topk_weights.topk(topk, dim=-1)
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    if custom_routing_function == None:
+        topk_weights = gating_output.softmax(dim=-1, dtype=torch.float)
+        topk_weights, selected_experts = topk_weights.topk(topk, dim=-1)
+        if renormalize:
+            topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    else:
+        topk_weights, selected_experts = custom_routing_function(hidden_states, gating_output, topk, renormalize)
     topk_weights = topk_weights.to(dtype)
 
     if expert_map is not None:
@@ -47,10 +52,15 @@ def fused_moe(
         expert_mask = (selected_experts == expert_idx)
         expert_weights = (topk_weights * expert_mask).sum(dim=-1, keepdim=True)
         x = F.linear(hidden_states, expert_w1)
+        if apply_router_weight_on_input:
+            x = x * expert_weights
         gate = F.silu(x[:, :intermediate_size])
         x = x[:, intermediate_size:] * gate
         x = F.linear(x, expert_w2)
-        current_hidden_states = x * expert_weights
+        if not apply_router_weight_on_input:
+            current_hidden_states = x * expert_weights
+        else:
+            current_hidden_states = x
         if final_hidden_states is None:
             final_hidden_states = current_hidden_states
         else:
