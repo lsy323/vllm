@@ -4,18 +4,16 @@ import torch
 import torch.nn.functional as F
 
 
-def fused_moe(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    gating_output: torch.Tensor,
-    topk: int,
-    global_num_experts: int,
-    expert_map: torch.Tensor = None,
-    renormalize: bool = False,
-    apply_router_weight_on_input: bool = False,
-    custom_routing_function=None
-) -> torch.Tensor:
+def fused_moe(hidden_states: torch.Tensor,
+              w1: torch.Tensor,
+              w2: torch.Tensor,
+              gating_output: torch.Tensor,
+              topk: int,
+              global_num_experts: int,
+              expert_map: torch.Tensor = None,
+              renormalize: bool = False,
+              apply_router_weight_on_input: bool = False,
+              custom_routing_function=None) -> torch.Tensor:
     """
     Args:
         hidden_states: [*, hidden_size]
@@ -37,9 +35,11 @@ def fused_moe(
         topk_weights = gating_output.softmax(dim=-1, dtype=torch.float)
         topk_weights, selected_experts = topk_weights.topk(topk, dim=-1)
         if renormalize:
-            topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+            topk_weights = topk_weights / topk_weights.sum(dim=-1,
+                                                           keepdim=True)
     else:
-        topk_weights, selected_experts = custom_routing_function(hidden_states, gating_output, topk, renormalize)
+        topk_weights, selected_experts = custom_routing_function(
+            hidden_states, gating_output, topk, renormalize)
     topk_weights = topk_weights.to(dtype)
 
     if expert_map is not None:

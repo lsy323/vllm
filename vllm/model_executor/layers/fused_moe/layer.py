@@ -102,7 +102,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         xm.mark_step()
         xm.wait_device_ops()
 
-
     def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
         # Pad the weight tensor. This is an optimization on ROCm platform, which
         # can benefit from tensors located far enough from one another in memory
@@ -321,16 +320,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             raise NotImplementedError(
                 "Expert score correction bias is not supported for TPU.")
         assert activation == "silu", f"{activation} is not supported for TPU."
-        return fused_moe_pallas(hidden_states=x,
-                                w1=layer.w13_weight,
-                                w2=layer.w2_weight,
-                                topk=top_k,
-                                gating_output=router_logits,
-                                global_num_experts=global_num_experts,
-                                expert_map=expert_map,
-                                renormalize=renormalize,
-                                apply_router_weight_on_input=apply_router_weight_on_input,
-                                custom_routing_function=custom_routing_function)
+        return fused_moe_pallas(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk=top_k,
+            gating_output=router_logits,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            renormalize=renormalize,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            custom_routing_function=custom_routing_function)
 
     forward_native = forward_tpu if current_platform.is_tpu() else forward_cuda
 

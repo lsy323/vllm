@@ -5,18 +5,15 @@ Run `pytest tests/kernels/test_moe.py`.
 """
 import pytest
 import torch
-from torch.nn import Parameter
-from torch.nn import functional as F
-from tests.kernels.utils import torch_moe
 from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
     fused_moe as iterative_moe)
 from vllm.model_executor.models.llama4 import Llama4MoE
-import torch_xla
 
 NUM_EXPERTS = [16]
 TOP_KS = [1]
 
 torch.manual_seed(12345)
+
 
 @pytest.mark.parametrize("m", [256])
 @pytest.mark.parametrize("n", [512])
@@ -43,35 +40,34 @@ def test_fused_moe(
     # torch_output = torch_moe(a, w1, w2, score, topk,
     #                          apply_router_weight_on_input=apply_router_weight_on_input,
     #                          custom_routing_function=custom_routing_function)
-    iterative_output = iterative_moe(a,
-                                     w1,
-                                     w2,
-                                     score,
-                                     topk,
-                                     global_num_experts=e,
-                                     apply_router_weight_on_input=apply_router_weight_on_input,
-                                     custom_routing_function=custom_routing_function)
-    
+    iterative_output = iterative_moe(
+        a,
+        w1,
+        w2,
+        score,
+        topk,
+        global_num_experts=e,
+        apply_router_weight_on_input=apply_router_weight_on_input,
+        custom_routing_function=custom_routing_function)
+
     a = a.to('xla')
     w1 = w1.to('xla')
     w2 = w2.to('xla')
     score = score.to('xla')
-    xla_output = iterative_moe(a,
-                            w1,
-                            w2,
-                            score,
-                            topk,
-                            global_num_experts=e,
-                            apply_router_weight_on_input=apply_router_weight_on_input,
-                            custom_routing_function=custom_routing_function)
-    
+    xla_output = iterative_moe(
+        a,
+        w1,
+        w2,
+        score,
+        topk,
+        global_num_experts=e,
+        apply_router_weight_on_input=apply_router_weight_on_input,
+        custom_routing_function=custom_routing_function)
+
     xla_output = xla_output.cpu()
-    
+
     print(xla_output)
     print(iterative_output)
     print(torch.max(xla_output - iterative_output))
 
-    torch.testing.assert_close(iterative_output,
-                               xla_output,
-                               atol=5e-2,
-                               rtol=0)
+    torch.testing.assert_close(iterative_output, xla_output, atol=5e-2, rtol=0)
