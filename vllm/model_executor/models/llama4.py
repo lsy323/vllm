@@ -149,6 +149,7 @@ class Llama4Attention(nn.Module):
         # TODO: attn_temperature_tuning should be a bool in huggingface
         self.attn_temperature_tuning = self.nope and \
             config.attn_temperature_tuning > 0
+        # print(f"check self.attn_temperature_tuning {self.attn_temperature_tuning}")
 
         self.floor_scale = getattr(config, "floor_scale", 8192.0)
         self.attn_scale = getattr(config, "attn_scale", 0.1)
@@ -244,7 +245,7 @@ class Llama4Attention(nn.Module):
             q = (q * attn_scale).to(q.dtype)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
-        return output
+        return output, {"qkv": qkv, "qkv_weight": self.qkv_proj.weight.data, "q": q, "k": k, "v": v, "attn_out": attn_output, "o": output}
 
 
 class Llama4DecoderLayer(nn.Module):
@@ -305,7 +306,11 @@ class Llama4DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
+        return_early=False
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # if return_early:
+        #     return hidden_states, residual
+        intermediate_output = {}
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -313,14 +318,31 @@ class Llama4DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        hidden_states = self.self_attn(positions=positions,
+        # if return_early:
+        #     return hidden_states, residual
+        intermediate_output['hidden_states_after_input_norm'] = hidden_states
+        intermediate_output['residual_after_input_norm'] = residual
+        # hidden_states_after_input_norm = hidden_states
+        # residual_after_input_norm = residual
+        # Fully Connected
+        hidden_states, attn_aux_out = self.self_attn(positions=positions,
                                        hidden_states=hidden_states)
-
+        intermediate_output["attn_aux_out"] = attn_aux_out
+        # hidden_states_after_attn = hidden_states
+        intermediate_output['hidden_states_after_attn'] = hidden_states
+        # if return_early:
+        #     return hidden_states, residual
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
+        # hidden_states_after_attn_norm = hidden_states
+        # residual_after_attn_norm = residual
+        intermediate_output['hidden_states_after_attn_norm'] = hidden_states
+        intermediate_output['residual_after_attn_norm'] = residual
         hidden_states = self.feed_forward(hidden_states)
-        return hidden_states, residual
+        # hidden_states_after_ffn = hidden_states
+        intermediate_output['hidden_states_after_ffn'] = hidden_states
+        return hidden_states, (residual, intermediate_output)
 
 
 @support_torch_compile

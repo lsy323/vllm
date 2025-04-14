@@ -356,9 +356,15 @@ class LlamaModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers[self.start_layer:self.end_layer]:
-            hidden_states, residual = layer(positions, hidden_states, residual)
-
+        per_layer_output = {}
+        # for idx, layer in enumerate(self.layers[self.start_layer:self.end_layer]):
+        for idx, layer in enumerate(self.layers[self.start_layer:self.start_layer+2]):
+            hidden_states, residual_1 = layer(positions, hidden_states, residual)
+            per_layer_output["hidden_"+str(idx)] = hidden_states
+            per_layer_output["residual_"+str(idx)] = residual_1
+            residual = residual_1[0]
+            # hidden_states_2, residual_2 = self.layers[1](positions, hidden_states_1, residual_1, return_early=True)
+            # residual_2 = residual_2[0]
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
@@ -366,7 +372,8 @@ class LlamaModel(nn.Module):
             })
 
         hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
+        per_layer_output["after_last_norm"] = hidden_states
+        return hidden_states, per_layer_output
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:

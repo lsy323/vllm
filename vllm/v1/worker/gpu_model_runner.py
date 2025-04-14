@@ -1005,12 +1005,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
             mm_embeds = self._gather_mm_embeddings(scheduler_output)
+            logger.info(f"check mm_embeds {mm_embeds}")
         else:
             mm_embeds = []
 
         # Prepare the decoder inputs.
         attn_metadata, logits_indices, spec_decode_metadata = (
             self._prepare_inputs(scheduler_output))
+        logger.info(f"check attn_mdetadata {attn_metadata}")
+        logger.info(f"check logits_indices {logits_indices}")
+        logger.info(f"check spec_decode_metadata {spec_decode_metadata}")
+
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -1032,8 +1037,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 inputs_embeds = self.model.get_input_embeddings(
                     input_ids, mm_embeds)
             else:
+                # logger.info(f"mm_embeds is none, get from input_ids")
                 inputs_embeds = self.model.get_input_embeddings(input_ids)
+                # logger.info(f"check inputs_embeds {inputs_embeds}")
             # TODO(woosuk): Avoid the copy. Optimize.
+            # logger.info(f"inputs_embeds shape {inputs_embeds.shape}")
+            # logger.info(f"self.inputs_embeds {self.inputs_embeds}")
+            # logger.info(f"self.inputs_embeds shape {self.inputs_embeds.shape}")
+            # logger.info(f"input_ids shape {input_ids.shape}")
+            # logger.info(f"num_scheduled_tokens {num_scheduled_tokens}, num_input_tokens {num_input_tokens}")
             self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
             input_ids = None
@@ -1064,13 +1076,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
+        logger.info(f"check input_ids {input_ids}")
+        logger.info(f"check positions {positions}")
+        # logger.info(f"check intermediate_tensors {intermediate_tensors}")
+        logger.info(f"check inputs_embeds {inputs_embeds}")
+        logger.info(f"check model type {type(self.model)}")
         with set_forward_context(attn_metadata, self.vllm_config):
-            hidden_states = self.model(
+            hidden_states, residual = self.model(
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
+        # if hidden_states.device.index == 0:
+        logger.info(f"check hidden_states shape {hidden_states.shape}")
+        logger.info(f"check hidden_states {hidden_states}")
+        logger.info(f"check residual {residual}")
+        dump_path = "/home/lsiyuan/vllm-workspace/dump"
+        import os
+        torch.save(residual, os.path.join(dump_path, "intermedita_"+str(hidden_states.device.index)+"_gpu.pt"))
+            # logger.info(f"check residual mean {torch.mean(residual)}")
+            # logger.info(f"check residual var {torch.var(residual)}")
         if not get_pp_group().is_last_rank:
             # For mid-pipeline stages, return the hidden states.
             return hidden_states
@@ -1078,6 +1104,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states = hidden_states[:num_scheduled_tokens]
         sample_hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
+        if hidden_states.device.index == 0:
+            logger.info(f"check sample_hidden_states shape {sample_hidden_states.shape}")
+            logger.info(f"check sample_hidden_states {sample_hidden_states}")
+            logger.info(f"check sample_hidden_states mean {torch.mean(sample_hidden_states)}")
+            logger.info(f"check sample_hidden_states var {torch.var(sample_hidden_states)}")
+            # logger.info(f"check logits[537] {logits[0][537]}")
+            # logger.info(f"check logits[563] {logits[0][563]}")
+            logger.info(f"check logits {logits}")
+            logger.info(f"check argmax {torch.argmax(logits)}")
 
         # Apply structured output bitmasks if present
         if scheduler_output.grammar_bitmask is not None:
@@ -1090,6 +1125,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
+            logger.info(f"check sampler_output {sampler_output}")
         else:
             # When indexing with a tensor (bonus_logits_indices), PyTorch
             # creates a new tensor with separate storage from the original
@@ -1439,7 +1475,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             with set_forward_context(None,
                                      self.vllm_config,
                                      num_tokens=num_tokens):
-                hidden_states = model(
+                hidden_states, _ = model(
                     input_ids=input_ids,
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,

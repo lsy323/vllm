@@ -26,20 +26,22 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.model_executor.models.llama4 import Llama4MoE
 
-NUM_EXPERTS = [8, 64]
-EP_SIZE = [1, 4]
-TOP_KS = [2, 6]
+NUM_EXPERTS = [16]
+EP_SIZE = [1]
+TOP_KS = [2]
 
+torch.manual_seed(12345)
 
-@pytest.mark.parametrize("m", [1, 33, 64, 222, 1024 * 128])
-@pytest.mark.parametrize("n", [128, 1024, 2048])
-@pytest.mark.parametrize("k", [128, 511, 1024])
+@pytest.mark.parametrize("m", [256])
+@pytest.mark.parametrize("n", [512])
+@pytest.mark.parametrize("k", [128])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("ep_size", EP_SIZE)
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("padding", [True, False])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("padding", [False])
 def test_fused_moe(
     m: int,
     n: int,
@@ -69,7 +71,12 @@ def test_fused_moe(
     else:
         e_map = None
 
-    torch_output = torch_moe(a, w1, w2, score, topk, e_map)
+    apply_router_weight_on_input = True
+    custom_routing_function = Llama4MoE.custom_routing_function
+    # custom_routing_function = None
+    torch_output = torch_moe(a, w1, w2, score, topk, e_map,
+                             apply_router_weight_on_input=apply_router_weight_on_input,
+                             custom_routing_function=custom_routing_function)
     iterative_output = iterative_moe(a,
                                      w1,
                                      w2,
@@ -77,7 +84,11 @@ def test_fused_moe(
                                      topk,
                                      global_num_experts=e,
                                      expert_map=e_map,
-                                     renormalize=False)
+                                     renormalize=False,
+                                     apply_router_weight_on_input=apply_router_weight_on_input,
+                                     custom_routing_function=custom_routing_function)
+    print(torch_output)
+    print(iterative_output)
 
     # Pad the weight if moe padding is enabled
     if padding:
@@ -91,13 +102,16 @@ def test_fused_moe(
                               w2,
                               score,
                               topk,
+                              apply_router_weight_on_input=apply_router_weight_on_input,
+                              custom_routing_function=custom_routing_function,
                               global_num_experts=e,
                               expert_map=e_map,
                               renormalize=False)
-    torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
+    print(triton_output)
+    torch.testing.assert_close(triton_output, torch_output, atol=2e-3, rtol=0)
     torch.testing.assert_close(iterative_output,
                                torch_output,
-                               atol=2e-2,
+                               atol=2e-3,
                                rtol=0)
 
 

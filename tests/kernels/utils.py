@@ -1053,12 +1053,22 @@ def compute_max_diff(output, output_ref):
         torch.abs(output_ref))
 
 
-def torch_moe(a, w1, w2, score, topk, expert_map):
+def torch_moe(a, w1, w2, score, topk, expert_map,
+              apply_router_weight_on_input: bool = False,
+              custom_routing_function=None):
+    # a (m, k)
+    # w1 (e, 2*n, k)
+    # w2 (e, k, n)
     B, D = a.shape
     a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
     out = torch.zeros(B * topk, w2.shape[1], dtype=a.dtype, device=a.device)
-    score = torch.softmax(score, dim=-1, dtype=torch.float32)
-    topk_weight, topk_ids = torch.topk(score, topk)
+    if custom_routing_function == None:
+        # score (m, e)
+        score = torch.softmax(score, dim=-1, dtype=torch.float32)
+        # topk_w/ids (m, topk)
+        topk_weight, topk_ids = torch.topk(score, topk)
+    else:
+        topk_weight, topk_ids = custom_routing_function(a, score, topk, False)
     topk_weight = topk_weight.view(-1)
     topk_ids = topk_ids.view(-1)
     if expert_map is not None:
@@ -1066,10 +1076,18 @@ def torch_moe(a, w1, w2, score, topk, expert_map):
     for i in range(w1.shape[0]):
         mask = topk_ids == i
         if mask.sum():
-            out[mask] = SiluAndMul()(
-                a[mask] @ w1[i].transpose(0, 1)) @ w2[i].transpose(0, 1)
-    return (out.view(B, -1, w2.shape[1]) *
-            topk_weight.view(B, -1, 1).to(out.dtype)).sum(dim=1)
+            if apply_router_weight_on_input:
+                masked_topk_weight = topk_weight.view(-1, 1).to(out.dtype)[mask]
+                out[mask] = SiluAndMul()(
+                    a[mask] @ w1[i].transpose(0, 1) * masked_topk_weight) @ w2[i].transpose(0, 1)
+            else:
+                out[mask] = SiluAndMul()(
+                    a[mask] @ w1[i].transpose(0, 1)) @ w2[i].transpose(0, 1)
+    if not apply_router_weight_on_input:
+        return (out.view(B, -1, w2.shape[1]) *
+                topk_weight.view(B, -1, 1).to(out.dtype)).sum(dim=1)
+    else:
+        return out.view(B, -1, w2.shape[1]).sum(dim=1)
 
 
 def torch_moe_single(a, w, score, topk):
