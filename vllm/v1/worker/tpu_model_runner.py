@@ -716,12 +716,12 @@ class TPUModelRunner:
         xm.wait_device_ops()
         ordinal = xr.global_ordinal()
         import torch.utils._pytree as pytree
-        logger.info("move tensors to CPU")
-        residual = pytree.tree_map_only(torch.Tensor, lambda x: x.cpu(),
-                                        residual)
-        logger.info("before torch save")
-        torch.save(residual,
-                   os.path.join(dump_path, f"intermedite_{ordinal}_tpu.pt"))
+        # logger.info("move tensors to CPU")
+        # residual = pytree.tree_map_only(torch.Tensor, lambda x: x.cpu(),
+        #                                 residual)
+        # logger.info("before torch save")
+        # torch.save(residual,
+        #            os.path.join(dump_path, f"intermedite_{ordinal}_tpu.pt"))
 
         hs_cpu = hidden_states.cpu()
         indices_to_sample = tpu_sampling_metadata.indices_do_sample.cpu()

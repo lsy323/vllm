@@ -152,9 +152,6 @@ class Llama4Attention(nn.Module):
         # TODO: attn_temperature_tuning should be a bool in huggingface
         self.attn_temperature_tuning = self.nope and \
             config.attn_temperature_tuning > 0
-        print(
-            f"check self.attn_temperature_tuning {self.attn_temperature_tuning}"
-        )
 
         self.floor_scale = getattr(config, "floor_scale", 8192.0)
         self.attn_scale = getattr(config, "attn_scale", 0.1)
@@ -459,6 +456,8 @@ class Llama4Model(LlamaModel):
         for name, loaded_weight in weights:
             m = xm.get_memory_info(device)
             logger.info(f"in llama4Model, load_weights name {name}, {m}")
+            xm.mark_step()
+            xm.wait_device_ops()
             if "experts.gate_up_proj" in name or "experts.down_proj" in name:
                 fused_experts_params = True
                 expert_params_mapping = expert_params_mapping_fused
@@ -538,22 +537,24 @@ class Llama4ForCausalLM(LlamaForCausalLM):
                            if self.config.tie_word_embeddings else None),
         )
 
-        import torch_xla.core.xla_model as xm
-        device = xm.xla_device()
-        logger.info(f"check device causallm {device}")
-        m = xm.get_memory_info(device)
-        print(m)
-        weights = []
-        for name, loaded_weight in weights:
-            weights.append(
-                self.permute_qk_weight_for_rotary(name, loaded_weight))
-            m = xm.get_memory_info(device)
-            print(m)
+        # import torch_xla.core.xla_model as xm
+        # device = xm.xla_device()
+        # logger.info(f"check device causallm {device}")
+        # m = xm.get_memory_info(device)
+        # print(m)
+        # weights = []
+        # for name, loaded_weight in weights:
+        #     weights.append(
+        #         self.permute_qk_weight_for_rotary(name, loaded_weight))
+        #     # m = xm.get_memory_info(device)
+        #     # print(m)
+        # print(f"check weight {weights}")
 
-        # weights = [
-        #     self.permute_qk_weight_for_rotary(name, loaded_weight)
-        #     for name, loaded_weight in weights
-        # ]
+        weights = [
+            self.permute_qk_weight_for_rotary(name, loaded_weight)
+            for name, loaded_weight in weights
+        ]
+        print(f"check weight len {len(weights)}")
         return loader.load_weights(weights)
 
     def permute_qk_weight_for_rotary(

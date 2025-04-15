@@ -451,7 +451,7 @@ class DefaultModelLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 model = _initialize_model(vllm_config=vllm_config)
-            model = model.to(target_device)
+            # model = model.to(target_device)
             import torch_xla.core.xla_model as xm
             xm.mark_step()
             xm.wait_device_ops()
@@ -472,6 +472,9 @@ class DefaultModelLoader(BaseModelLoader):
                         "Following weights were not initialized from "
                         f"checkpoint: {weights_not_loaded}")
 
+            for name, p in model.named_parameters():
+                if "language_model.model.layers.0.self_attn.qkv_proj.weight" in name:
+                    print(f"weight name is {name}, weight is {p}")
             _process_weights_after_loading(model, model_config, target_device)
 
         return model.eval()
