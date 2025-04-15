@@ -241,9 +241,9 @@ def _support_torch_compile(
         # usually, capturing the model once is enough, and then we can
         # dispatch to the compiled code directly, without going through
         # the Dynamo guard mechanism.
-        with self.dispatch_to_code(0):
-            model_output = self.forward(*args, **kwargs)
-            return model_output
+        # with self.dispatch_to_code(-1):
+        model_output = self.forward(*args, **kwargs)
+        return model_output
 
     cls.__call__ = __call__
     return cls

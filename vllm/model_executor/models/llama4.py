@@ -41,8 +41,8 @@ from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (AutoWeightsLoader, extract_layer_index,
                     is_pp_missing_parameter)
 
-
 logger = init_logger(__name__)
+
 
 class Llama4MoE(nn.Module):
 
@@ -152,6 +152,9 @@ class Llama4Attention(nn.Module):
         # TODO: attn_temperature_tuning should be a bool in huggingface
         self.attn_temperature_tuning = self.nope and \
             config.attn_temperature_tuning > 0
+        print(
+            f"check self.attn_temperature_tuning {self.attn_temperature_tuning}"
+        )
 
         self.floor_scale = getattr(config, "floor_scale", 8192.0)
         self.attn_scale = getattr(config, "attn_scale", 0.1)
@@ -247,7 +250,15 @@ class Llama4Attention(nn.Module):
             q = (q * attn_scale).to(q.dtype)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
-        return output
+        return output, {
+            "qkv": qkv,
+            "qkv_weight": self.qkv_proj.weight.data,
+            "q": q,
+            "k": k,
+            "v": v,
+            "attn_out": attn_output,
+            "o": output
+        }
 
 
 class Llama4DecoderLayer(nn.Module):
@@ -303,12 +314,14 @@ class Llama4DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
 
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self,
+                positions: torch.Tensor,
+                hidden_states: torch.Tensor,
+                residual: Optional[torch.Tensor],
+                return_early=False) -> Tuple[torch.Tensor, torch.Tensor]:
+        # if return_early:
+        #     return hidden_states, residual
+        intermediate_output = {}
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -316,14 +329,31 @@ class Llama4DecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        hidden_states = self.self_attn(positions=positions,
-                                       hidden_states=hidden_states)
-
+        # if return_early:
+        #     return hidden_states, residual
+        intermediate_output['hidden_states_after_input_norm'] = hidden_states
+        intermediate_output['residual_after_input_norm'] = residual
+        # hidden_states_after_input_norm = hidden_states
+        # residual_after_input_norm = residual
+        # Fully Connected
+        hidden_states, attn_aux_out = self.self_attn(
+            positions=positions, hidden_states=hidden_states)
+        intermediate_output["attn_aux_out"] = attn_aux_out
+        # hidden_states_after_attn = hidden_states
+        intermediate_output['hidden_states_after_attn'] = hidden_states
+        # if return_early:
+        #     return hidden_states, residual
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
+        # hidden_states_after_attn_norm = hidden_states
+        # residual_after_attn_norm = residual
+        intermediate_output['hidden_states_after_attn_norm'] = hidden_states
+        intermediate_output['residual_after_attn_norm'] = residual
         hidden_states = self.feed_forward(hidden_states)
-        return hidden_states, residual
+        # hidden_states_after_ffn = hidden_states
+        intermediate_output['hidden_states_after_ffn'] = hidden_states
+        return hidden_states, (residual, intermediate_output)
 
 
 @support_torch_compile
@@ -507,18 +537,19 @@ class Llama4ForCausalLM(LlamaForCausalLM):
             skip_prefixes=(["lm_head."]
                            if self.config.tie_word_embeddings else None),
         )
-        weights = []
+
         import torch_xla.core.xla_model as xm
         device = xm.xla_device()
         logger.info(f"check device causallm {device}")
         m = xm.get_memory_info(device)
         print(m)
-        
+        weights = []
         for name, loaded_weight in weights:
-            weights.append(self.permute_qk_weight_for_rotary(name, loaded_weight))
+            weights.append(
+                self.permute_qk_weight_for_rotary(name, loaded_weight))
             m = xm.get_memory_info(device)
             print(m)
-            
+
         # weights = [
         #     self.permute_qk_weight_for_rotary(name, loaded_weight)
         #     for name, loaded_weight in weights
@@ -534,16 +565,9 @@ class Llama4ForCausalLM(LlamaForCausalLM):
         def permute(w: torch.Tensor, n_heads: int):
             attn_in = self.config.head_dim * n_heads
             attn_out = self.config.hidden_size
-            if w.device.type != 'cpu':
-                device = w.device
-                w = w.cpu()
-                w = w.view(n_heads, attn_in // n_heads // 2, 2,
-                               attn_out).transpose(1, 2).reshape(attn_in, attn_out)
-                w = w.to(device)
-                return w
-            else:
-                return w.view(n_heads, attn_in // n_heads // 2, 2,
-                            attn_out).transpose(1, 2).reshape(attn_in, attn_out)
+
+            return w.view(n_heads, attn_in // n_heads // 2, 2,
+                          attn_out).transpose(1, 2).reshape(attn_in, attn_out)
 
         modules = name.split(".")
 

@@ -672,7 +672,14 @@ class TPUModelRunner:
                 inputs_embeds = self.model.get_input_embeddings(
                     self.input_ids, mm_embeds)
             else:
+                num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+                input_ids = self.input_ids[:num_scheduled_tokens]
                 inputs_embeds = self.model.get_input_embeddings(self.input_ids)
+                # logger.info(f"inputs_embeds shape {inputs_embeds.shape}")
+                # logger.info(f"check inputs_embeds {inputs_embeds}")
+                inputs_embeds[num_scheduled_tokens:] = 0
+                xm.mark_step()
+                xm.wait_device_ops()
             input_ids = None
         else:
             # For text-only models, we use token ids as input.
@@ -687,15 +694,56 @@ class TPUModelRunner:
         # avoid recompilations.
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
             from_input_batch(self.input_batch, logits_indices)
+        logger.info("In model execution")
+        logger.info(f"check input_ids {input_ids}")
+        logger.info(f"check positions {self.position_ids}")
+        logger.info(f"check inputs_embeds {inputs_embeds}")
+
+        dump_path = "/home/lsiyuan/dump/"
+        import os
+        # torch.save(input_ids.cpu(), os.path.join(dump_path, "input_ids_tpu.pt"))
+        # torch.save(self.position_ids.cpu(), os.path.join(dump_path, "position_ids_tpu.pt"))
+        # torch.save(inputs_embeds.cpu(), os.path.join(dump_path, "inputs_embeds_tpu.pt"))
+
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config):
-            hidden_states = self.model(
+            hidden_states, residual = self.model(
                 input_ids=input_ids,
                 positions=self.position_ids,
                 inputs_embeds=inputs_embeds,
             )
+        xm.mark_step()
+        xm.wait_device_ops()
+        ordinal = xr.global_ordinal()
+        import torch.utils._pytree as pytree
+        logger.info("move tensors to CPU")
+        residual = pytree.tree_map_only(torch.Tensor, lambda x: x.cpu(),
+                                        residual)
+        logger.info("before torch save")
+        torch.save(residual,
+                   os.path.join(dump_path, f"intermedite_{ordinal}_tpu.pt"))
+
+        hs_cpu = hidden_states.cpu()
+        indices_to_sample = tpu_sampling_metadata.indices_do_sample.cpu()
+        sample_hidden_states = hidden_states[indices_to_sample]
+        logits = self.model.compute_logits(sample_hidden_states, None)
+        sampled_logits = torch.argmax(logits, dim=-1, keepdim=True)
+        # if xr.global_ordinal() == 0:
+        # logger.info(f"check residual {residual}")
+        # logger.info(f"check residual mean {torch.mean(residual)}")
+        # logger.info(f"check residual var {torch.var(residual)}")
+        # logger.info(f"check hidden_states shape {hs_cpu.shape}")
+        # logger.info(f"check hidden_states {hs_cpu}")
+        # logger.info(f"check sampling indices {indices_to_sample}")
+        # logger.info(f"selected hidden {hs_cpu[indices_to_sample]}")
+        # logger.info(f"check hidden_states mean {torch.mean(hs_cpu[indices_to_sample][0])}")
+        # logger.info(f"check hidden_states var {torch.var(hs_cpu[indices_to_sample][0])}")
+        # logger.info(f"check tpu_sampling_metadata.all_greedy {tpu_sampling_metadata.all_greedy}")
+        # logger.info(f"check logits[0][563] {logits[indices_to_sample][0][563]}")
+        # logger.info(f"check logits[0][537] {logits[indices_to_sample][0][537]}")
         selected_token_ids = self.sample_from_hidden(hidden_states,
                                                      tpu_sampling_metadata)
+        logger.info(f"check selected_token_ids {selected_token_ids}")
         # Remove padding on cpu and keep dynamic op outside of xla graph.
         selected_token_ids = selected_token_ids.cpu()[:num_reqs]
 
@@ -852,9 +900,9 @@ class TPUModelRunner:
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
         with set_forward_context(attn_metadata, self.vllm_config, 0):
-            out = self.model(input_ids=input_ids,
-                             positions=position_ids,
-                             inputs_embeds=inputs_embeds)
+            out, _ = self.model(input_ids=input_ids,
+                                positions=position_ids,
+                                inputs_embeds=inputs_embeds)
         self._hidden_states_dtype = out.dtype
 
     def capture_model(self) -> None:
@@ -958,9 +1006,9 @@ class TPUModelRunner:
             compiled_model = self.model.model
         if isinstance(compiled_model, TorchCompileWrapperWithCustomDispatcher):
             logger.info("Clear dynamo cache and cached dynamo bytecode.")
-            torch._dynamo.eval_frame.remove_from_cache(
-                compiled_model.original_code_object)
-            compiled_model.compiled_codes.clear()
+            # torch._dynamo.eval_frame.remove_from_cache(
+            #     compiled_model.original_code_object)
+            # compiled_model.compiled_codes.clear()
 
     def sample_from_hidden(
         self,
