@@ -643,18 +643,42 @@ class TPUModelRunner:
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
             xm.mark_step()
+            xm.wait_device_ops()
+            self._verify_num_xla_graphs("execute_mm_encoder")
+            logger.info("after 1st check in execute mm encoder")
             curr_group_outputs = self.model.get_multimodal_embeddings(
                 **batched_mm_inputs)
             xm.mark_step()
+            xm.wait_device_ops()
+            self._verify_num_xla_graphs("execute_mm_encoder")
+            logger.info("after 2nd check in execute mm encoder")
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
                 expected_num_items=len(grouped_mm_inputs),
             )
+            xm.mark_step()
+            xm.wait_device_ops()
+            self._verify_num_xla_graphs("execute_mm_encoder")
+            logger.info("after 3rd check in execute mm encoder")
+            
+            logger.info(f"check curr_group_outputs type {type(curr_group_outputs)}")
 
-            for output in curr_group_outputs:
-                encoder_outputs.append(output)
+            if isinstance(curr_group_outputs, torch.Tensor):
+                encoder_outputs.append(curr_group_outputs)
+            else:
+                assert isinstance(curr_group_outputs, (list, tuple))
+                for output in curr_group_outputs:
+                    encoder_outputs.append(output)
+            xm.mark_step()
+            xm.wait_device_ops()
+            self._verify_num_xla_graphs("execute_mm_encoder")
+            logger.info("after 4th check in execute mm encoder")
 
+        xm.mark_step()
+        xm.wait_device_ops()
+        self._verify_num_xla_graphs("execute_mm_encoder")
+        logger.info("after 5th check in execute mm encoder")
         # Cache the encoder outputs.
         # NOTE (NickLucche) here we diverge from logic in other runners, as we
         # assume to only have whole mm items to process. Hence we avoid the
@@ -668,6 +692,10 @@ class TPUModelRunner:
             assert pos_info.is_embed is None, "Expected all positions to be"\
                 " contiguous and embeddings."
             self.encoder_cache[req_id][input_id] = output
+        xm.mark_step()
+        xm.wait_device_ops()
+        self._verify_num_xla_graphs("execute_mm_encoder")
+        logger.info("after 6th check in execute mm encoder")
 
     def _gather_mm_embeddings(
         self,
@@ -742,16 +770,26 @@ class TPUModelRunner:
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
+            xm.mark_step()
+            xm.wait_device_ops()
+            self._verify_num_xla_graphs("execute_model")
+            logger.info('pass check after _execute_mm_encoder')
             mm_embeds = self._gather_mm_embeddings(scheduler_output)
         else:
             mm_embeds = []
-
+        xm.mark_step()
+        xm.wait_device_ops()
+        self._verify_num_xla_graphs("execute_model")
+        logger.info('pass first check')
         # Prepare inputs
         attn_metadata, logits_indices, padded_num_reqs = self._prepare_inputs(
             scheduler_output)
         input_ids, inputs_embeds = self._get_model_inputs(
             self.input_ids, mm_embeds)
         xm.mark_step()
+        xm.wait_device_ops()
+        self._verify_num_xla_graphs("execute_model")
+        logger.info('pass 2nd check')
         num_reqs = self.input_batch.num_reqs
         # Run the decoder
         with set_forward_context(attn_metadata, self.vllm_config):
@@ -844,6 +882,7 @@ class TPUModelRunner:
         # Check there are no new graphs compiled - all the graphs should be
         # captured and compiled during warm up.
         self._verify_num_xla_graphs("execute_model")
+        logger.info('pass 3rd check')
 
         return model_runner_output
 
@@ -943,9 +982,11 @@ class TPUModelRunner:
                     mode, num_items)
                 # Run multimodal encoder.
                 xm.mark_step()
+                xm.wait_device_ops()
                 mm_embeds = self.model.\
                     get_multimodal_embeddings(**batched_dummy_mm_inputs)
                 xm.mark_step()
+                xm.wait_device_ops()
                 num_patches = mm_embeds[0].shape[0]
                 items_size = num_patches * num_items
 
@@ -969,7 +1010,10 @@ class TPUModelRunner:
                         # Assign outputs or the graph will be cut short.
                         a, b = self._get_model_inputs(placeholders_ids,
                                                       [mm_embeds])
+                        assert a is None
+                        # b = b.cpu()
                         xm.mark_step()
+                        xm.wait_device_ops()
 
             # Pre-compile `get_input_embeddings` when mm_embeddings are not
             # present. Chunk is only made of text, no mm_placeholders.
@@ -979,7 +1023,10 @@ class TPUModelRunner:
                                                device="cpu")
                 placeholders_ids = placeholders_ids.to(self.device)
                 a, b = self._get_model_inputs(placeholders_ids, [])
+                assert a is None
+                # b = b.cpu()
                 xm.mark_step()
+                xm.wait_device_ops()
 
             xm.wait_device_ops()
             end = time.perf_counter()
