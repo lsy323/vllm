@@ -456,8 +456,8 @@ class Llama4Model(LlamaModel):
         for name, loaded_weight in weights:
             m = xm.get_memory_info(device)
             logger.info(f"in llama4Model, load_weights name {name}, {m}")
-            xm.mark_step()
-            xm.wait_device_ops()
+            # xm.mark_step()
+            # xm.wait_device_ops()
             if "experts.gate_up_proj" in name or "experts.down_proj" in name:
                 fused_experts_params = True
                 expert_params_mapping = expert_params_mapping_fused

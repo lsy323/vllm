@@ -4,6 +4,11 @@ from typing import Any, Dict, Optional
 
 import torch
 
+from vllm.platforms import current_platform
+
+if current_platform.is_tpu():
+    import torch_xla.core.xla_model as xm
+
 
 def set_random_seed(seed: int) -> None:
     from vllm.platforms import current_platform
@@ -49,5 +54,8 @@ def _make_synced_weight_loader(original_weight_loader):
     def _synced_weight_loader(param, *args, **kwargs):
         original_weight_loader(param, *args, **kwargs)
         torch._sync(param)
+        if current_platform.is_tpu():
+            xm.mark_step()
+            xm.wait_device_ops()
 
     return _synced_weight_loader
