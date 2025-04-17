@@ -183,8 +183,8 @@ class TPUWorker:
         profiled = current_mem * 1.02
 
         # Calculate the TPU KV cache size based on profiling.
-        usable_memory_size = int(total_memory_size *
-                                 self.cache_config.gpu_memory_utilization)
+        usable_memory_size = int(
+            total_memory_size * self.cache_config.gpu_memory_utilization) // 3
         tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
 
         return int(tpu_kv_cache_bytes)

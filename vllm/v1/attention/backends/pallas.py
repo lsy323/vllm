@@ -168,7 +168,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
             num_kv_pages_per_block=None,
             num_queries_per_block=None,
             vmem_limit_bytes=None,
-            use_kernel=True,
+            use_kernel=False,
             sm_scale=self.scale,
             sliding_window=self.sliding_window,
             soft_cap=self.logits_soft_cap,
