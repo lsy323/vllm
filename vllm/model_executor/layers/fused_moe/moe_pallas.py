@@ -11,7 +11,11 @@ def fused_moe(
     w2: torch.Tensor,
     gating_output: torch.Tensor,
     topk: int,
-    renormalize: bool,
+    global_num_experts: int,
+    expert_map: torch.Tensor = None,
+    renormalize: bool = False,
+    apply_router_weight_on_input: bool = False,
+    custom_routing_function=None
 ) -> torch.Tensor:
     """
     Args:
@@ -19,6 +23,7 @@ def fused_moe(
         w1: [num_experts, intermediate_size * 2, hidden_size]
         w2: [num_experts, hidden_size, intermediate_size]
         gating_output: [*, num_experts]
+        expert_map: [num_experts]
     """
     orig_shape = hidden_states.shape
     hidden_size = hidden_states.shape[-1]
@@ -32,9 +37,17 @@ def fused_moe(
         f"16 but got {num_tokens * topk}")
 
     hidden_states = hidden_states.view(num_tokens, hidden_size)
-    gating_output = gating_output.view(num_tokens, num_experts)
-    topk_weights = gating_output.softmax(dim=-1, dtype=torch.float)
-    topk_weights, topk_indices = topk_weights.topk(topk, dim=-1)
+    gating_output = gating_output.view(num_tokens, global_num_experts)
+    if custom_routing_function == None:
+        topk_weights = gating_output.softmax(dim=-1, dtype=torch.float)
+        topk_weights, topk_indices = topk_weights.topk(topk, dim=-1)
+        if renormalize:
+            topk_weights = topk_weights / topk_weights.sum(dim=-1,
+                                                           keepdim=True)
+    else:
+        topk_weights, topk_indices = custom_routing_function(
+            hidden_states, gating_output, topk, renormalize)
+    # Need to assert expert map is None at caller side
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
     topk_weights = topk_weights.to(dtype)
@@ -54,11 +67,15 @@ def fused_moe(
 
     x = hidden_states[token_indices]
     x = torch.ops.xla.gmm(x, w1, group_sizes)
+    if apply_router_weight_on_input:
+        topk_weights = topk_weights[topk_argsort_indices].flatten()
+        x = x * topk_weights.unsqueeze_(dim=-1)
     x = F.silu(x[..., :intermediate_size]) * x[..., intermediate_size:]
     x = torch.ops.xla.gmm(x, w2, group_sizes)
     x = x[topk_argsort_revert_indices].reshape(-1, topk, hidden_size)
 
-    x = x * topk_weights.unsqueeze_(dim=-1)
+    if not apply_router_weight_on_input:
+        x = x * topk_weights.unsqueeze_(dim=-1)
     x = x.sum(dim=-2)
     x = x.reshape(orig_shape)
     return x

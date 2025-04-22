@@ -7,6 +7,8 @@ import pytest
 import torch
 from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
     fused_moe as iterative_moe)
+from vllm.model_executor.layers.fused_moe.moe_pallas import (
+    fused_moe as pallas_moe)
 from vllm.model_executor.models.llama4 import Llama4MoE
 
 NUM_EXPERTS = [16]
@@ -68,6 +70,23 @@ def test_fused_moe(
 
     print(xla_output)
     print(iterative_output)
-    print(torch.max(xla_output - iterative_output))
+    print(torch.max(torch.abs(xla_output - iterative_output)))
 
     torch.testing.assert_close(iterative_output, xla_output, atol=5e-2, rtol=0)
+    
+    # Run pallas moe
+    xla_pallas_output = pallas_moe(
+        a,
+        w1,
+        w2,
+        score,
+        topk,
+        global_num_experts=e,
+        apply_router_weight_on_input=apply_router_weight_on_input,
+        custom_routing_function=custom_routing_function)
+
+    xla_pallas_output = xla_pallas_output.cpu()
+    print(xla_pallas_output)
+    print(torch.max(torch.abs(xla_output - xla_pallas_output)))
+    torch.testing.assert_close(iterative_output, xla_pallas_output, atol=5e-2, rtol=0)
+
