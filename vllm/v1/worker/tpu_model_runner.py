@@ -516,10 +516,10 @@ class TPUModelRunner:
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
             self.input_batch.block_table.get_cpu_tensor()[:num_reqs])
-        block_tables = block_tables.to(self.device)
+        block_tables = block_tables.to('xla')
         query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1].to(
             self.device)
-        seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
+        seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to('xla')
 
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
@@ -540,7 +540,8 @@ class TPUModelRunner:
         # Indices at which we sample (positions of last token in the sequence).
         # Padded to avoid recompiling when `num_reqs` varies.
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
-        logits_indices = logits_indices.to(self.device)
+        logger.info(f"check logits_indices in prepare inputs {logits_indices}")
+        logits_indices = logits_indices.to('xla')
         return attn_metadata, logits_indices, padded_num_reqs
 
     def _scatter_placeholders(
@@ -723,12 +724,20 @@ class TPUModelRunner:
                 positions=self.position_ids,
                 inputs_embeds=inputs_embeds,
             )
+        logger.info(f"check hidden states {hidden_states}")
         hidden_states = self.select_hidden_states(hidden_states,
                                                   logits_indices)
+        logger.info(f"check logits_indices {logits_indices}")
+        logger.info(f"check selected hidden states {hidden_states}")
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
             from_input_batch(self.input_batch, padded_num_reqs, self.device)
-        selected_token_ids = self.sample_from_hidden(hidden_states,
-                                                     tpu_sampling_metadata)
+
+        selected_token_ids, logits_and_weights = self.sample_from_hidden(
+            hidden_states, tpu_sampling_metadata)
+        logger.info(f"check logits {logits_and_weights[0]}")
+        logger.info(f"check lm_head weight {logits_and_weights[1]}")
+        logger.info(f"check sampled hidden states {logits_and_weights[2]}")
+        logger.info(f"check selected_token_ids {selected_token_ids}")
         # Remove padding on cpu and keep dynamic op outside of xla graph.
         selected_token_ids = selected_token_ids.cpu()[:num_reqs]
 
@@ -843,32 +852,22 @@ class TPUModelRunner:
                                         dtype=self.dtype,
                                         device=self.device)
         else:
-            input_ids = torch.zeros((num_tokens),
-                                    dtype=torch.int32,
-                                    device=self.device)
+            input_ids = torch.zeros((num_tokens), dtype=torch.int32).to('xla')
             inputs_embeds = None
         actual_num_reqs = min(num_tokens, self.max_num_reqs)
-        position_ids = torch.zeros(num_tokens,
-                                   dtype=torch.int32,
-                                   device=self.device)
-        slot_mapping = torch.zeros(num_tokens,
-                                   dtype=torch.int64,
-                                   device=self.device)
+        position_ids = torch.zeros(num_tokens, dtype=torch.int32).to('xla')
+        slot_mapping = torch.zeros(num_tokens, dtype=torch.int64).to('xla')
         block_tables = torch.zeros(
             (self.max_num_reqs, self.block_table_cpu.shape[1]),
-            dtype=torch.int32,
-            device=self.device)
+            dtype=torch.int32).to('xla')
         query_lens = [1] * self.max_num_reqs
         query_start_loc = torch.cumsum(torch.tensor([0] + query_lens,
                                                     dtype=torch.int32),
                                        dim=0,
-                                       dtype=torch.int32).to(self.device)
+                                       dtype=torch.int32).to('xla')
         context_lens = torch.ones((self.max_num_reqs, ),
-                                  dtype=torch.int32,
-                                  device=self.device)
-        num_seqs = torch.tensor([actual_num_reqs],
-                                dtype=torch.int32,
-                                device=self.device)
+                                  dtype=torch.int32).to('xla')
+        num_seqs = torch.tensor([actual_num_reqs], dtype=torch.int32).to('xla')
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,
@@ -884,6 +883,13 @@ class TPUModelRunner:
         torch._dynamo.mark_dynamic(position_ids, 0)
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
+        import torch_xla.distributed.spmd as xs
+        num_devices = xr.global_runtime_device_count()
+        mesh_shape = (num_devices, 1)
+        device_ids = np.array(range(num_devices))
+        mesh = xs.Mesh(device_ids, mesh_shape, ('x', 'y'))
+        # xs.mark_sharding(input_ids, mesh, (None,))
+        # xs.mark_sharding(position_ids, mesh, (None,))
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             out = self.model(input_ids=input_ids,
                              positions=position_ids,
@@ -894,6 +900,8 @@ class TPUModelRunner:
         logger.info("Compiling the model with different input shapes.")
 
         start = time.perf_counter()
+        xm.mark_step()
+        xm.wait_device_ops()
         for num_tokens in self.num_tokens_paddings:
             logger.info("  -- num_tokens: %d", num_tokens)
             self._dummy_run(num_tokens)
@@ -974,6 +982,12 @@ class TPUModelRunner:
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
+
+        logger.info("before init kv cache, clear pending ops")
+        xm.mark_step()
+        xm.wait_device_ops()
+        logger.info("start init kv cache")
+
         if len(kv_cache_config.kv_cache_groups) > 1:
             raise NotImplementedError(
                 "Hybrid models with more than one KV cache type are not "
@@ -994,17 +1008,19 @@ class TPUModelRunner:
                     dtype = kv_cache_spec.dtype
 
                     tpu_kv_cache = torch.zeros(kv_cache_shape,
-                                               dtype=dtype,
-                                               device=self.device)
+                                               dtype=dtype).to('xla')
 
                     kv_caches[layer_name] = tpu_kv_cache
                 else:
                     raise NotImplementedError
 
+        xm.mark_step()
+        xm.wait_device_ops()
         bind_kv_cache(
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
+        logger.info("end init kv cache")
 
     def reset_dynamo_cache(self):
         if self.is_multimodal_model:
@@ -1016,12 +1032,14 @@ class TPUModelRunner:
             torch._dynamo.eval_frame.remove_from_cache(
                 compiled_model.original_code_object)
             compiled_model.compiled_codes.clear()
+        else:
+            logger.info("Do not need to clear dynamo cache.")
 
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def select_hidden_states(self, hidden_states, indices_do_sample):
         return hidden_states[indices_do_sample]
 
-    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    # @torch.compile(backend="openxla")
     def sample_from_hidden(
         self,
         sample_hidden_states: torch.Tensor,
@@ -1031,13 +1049,16 @@ class TPUModelRunner:
         Sample with xla-friendly function. This function is to be traced 
         separately from `forward` for lighter compilation overhead.
         """
-        logits = self.model.compute_logits(sample_hidden_states, None)
+        # logits = self.model.compute_logits(sample_hidden_states, None)
+        logits = sample_hidden_states @ self.model.lm_head.weight.transpose(
+            0, 1)
         if sampling_metadata.all_greedy:
             out_tokens = torch.argmax(logits, dim=-1, keepdim=True)
         else:
             out_tokens = self.sampler(logits,
                                       sampling_metadata).sampled_token_ids
-        return out_tokens
+        return out_tokens, (logits, self.model.lm_head.weight,
+                            sample_hidden_states)
 
     def get_multimodal_embeddings(self, *args, **kwargs):
         return self.model.get_multimodal_embeddings(*args, **kwargs)

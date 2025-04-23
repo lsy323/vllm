@@ -142,9 +142,7 @@ class TPUWorker:
 
                 # Use an empty tensor instead of `None`` to force Dynamo to pass
                 # it by reference, rather by specializing on the value ``None``.
-                tpu_kv_cache = torch.tensor([],
-                                            dtype=dtype,
-                                            device=self.device)
+                tpu_kv_cache = torch.tensor([], dtype=dtype).to(self.device)
                 kv_caches[layer_name] = tpu_kv_cache
             else:
                 raise NotImplementedError(
@@ -156,11 +154,30 @@ class TPUWorker:
             self.vllm_config.compilation_config.static_forward_context,
             runner_kv_caches)
 
+        xm.mark_step()
+        xm.wait_device_ops()
+        logger.info("run something")
+        x = torch.rand(4).to('xla')
+        import numpy as np
+        import torch_xla.distributed.spmd as xs
+        num_devices = xr.global_runtime_device_count()
+        mesh_shape = (num_devices, 1)
+        device_ids = np.array(range(num_devices))
+        mesh = xs.Mesh(device_ids, mesh_shape, ('x', 'y'))
+        xs.mark_sharding(x, mesh, (None, ))
+        x = torch.sin(x)
+        xm.mark_step()
+        xm.wait_device_ops()
+        logger.info(f"check x {x}")
+        # return 1024 * 128
+        logger.info("before dummy run")
         # `max_num_tokens >= max_num_batched_tokens` due to padding.
         self.model_runner._dummy_run(self.model_runner.max_num_tokens)
 
         # Synchronize before measuring the memory usage.
+        xm.mark_step()
         xm.wait_device_ops()
+        logger.info("after dummy run")
 
         # During the profiling run, the model runs without KV cache. After
         # the profiling run, the model always runs with KV cache. Here we clear
@@ -172,9 +189,12 @@ class TPUWorker:
 
         # Get the maximum amount of memory used by the model weights and
         # intermediate activations.
-        m = xm.get_memory_info(self.device)
-        total_memory_size = m["bytes_limit"]
-        current_mem = m["bytes_used"]
+        # Doesn't work with SPMD
+        # m = xm.get_memory_info(None)
+        # total_memory_size = m["bytes_limit"]
+        # current_mem = m["bytes_used"]
+        total_memory_size = 1024 * 1024 * 1024 * 30  # assume 30 GB
+        current_mem = 1024 * 1024 * 1024 * 20  # assume 20 GB
         # Ideally we would use profiled = m["peak_bytes_used"] to
         # get weights + activations. But there is memory used during
         # compilation / weight loading that impacts the peak and
@@ -187,6 +207,7 @@ class TPUWorker:
                                  self.cache_config.gpu_memory_utilization)
         tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
 
+        logger.info("after profiling run")
         return int(tpu_kv_cache_bytes)
 
     def execute_model(

@@ -79,7 +79,9 @@ def device_loading_context(module: torch.nn.Module,
     for name, p in module.named_parameters():
         if p.device.type == "cpu":
             original_device_states[name] = p.device
-            p.data = p.data.to(target_device)
+            # Disable for SPMD for now, may need to hack target device to be cpu
+            # for spmd path.
+            # p.data = p.data.to(target_device)
         # Parameters already on target device are not touched
 
     try:
@@ -447,13 +449,36 @@ class DefaultModelLoader(BaseModelLoader):
         device_config = vllm_config.device_config
         model_config = vllm_config.model_config
         target_device = torch.device(device_config.device)
+        use_spmd = True
+
+        if use_spmd:
+            import torch_xla.distributed.spmd as xs
+            from torch_xla import runtime as xr
+
+        if use_spmd:
+            # TODO: put in a central location for these config
+            xr.use_spmd()
+            num_devices = xr.global_runtime_device_count()
+            mesh_shape = (num_devices, 1)
+            device_ids = np.array(range(num_devices))
+            mesh = xs.Mesh(device_ids, mesh_shape, ('x', 'y'))
+
         with set_default_torch_dtype(model_config.dtype):
-            with target_device:
+            if not use_spmd:
+                with target_device:
+                    model = _initialize_model(vllm_config=vllm_config)
+            else:
+                # For SPMD we init model on CPU, then use mark_sharding to shard
+                # model and move shards to TPU.
                 model = _initialize_model(vllm_config=vllm_config)
 
+            # Load full weights to CPU for now
             weights_to_load = {name for name, _ in model.named_parameters()}
             loaded_weights = model.load_weights(
                 self.get_all_weights(model_config, model))
+            model = model.to('xla')
+            logger.info(f"qwen model type {type(model)}")
+            # model.model = torch.compile(model.model, backend="openxla")
             self.counter_after_loading_weights = time.perf_counter()
             logger.info(
                 "Loading weights took %.2f seconds",
