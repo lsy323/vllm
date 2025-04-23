@@ -852,11 +852,14 @@ class TPUModelRunner:
                                         dtype=self.dtype,
                                         device=self.device)
         else:
-            input_ids = torch.zeros((num_tokens), dtype=torch.int32).to(self.device)
+            input_ids = torch.zeros((num_tokens),
+                                    dtype=torch.int32).to(self.device)
             inputs_embeds = None
         actual_num_reqs = min(num_tokens, self.max_num_reqs)
-        position_ids = torch.zeros(num_tokens, dtype=torch.int32).to(self.device)
-        slot_mapping = torch.zeros(num_tokens, dtype=torch.int64).to(self.device)
+        position_ids = torch.zeros(num_tokens,
+                                   dtype=torch.int32).to(self.device)
+        slot_mapping = torch.zeros(num_tokens,
+                                   dtype=torch.int64).to(self.device)
         block_tables = torch.zeros(
             (self.max_num_reqs, self.block_table_cpu.shape[1]),
             dtype=torch.int32).to(self.device)
@@ -867,7 +870,8 @@ class TPUModelRunner:
                                        dtype=torch.int32).to(self.device)
         context_lens = torch.ones((self.max_num_reqs, ),
                                   dtype=torch.int32).to(self.device)
-        num_seqs = torch.tensor([actual_num_reqs], dtype=torch.int32).to(self.device)
+        num_seqs = torch.tensor([actual_num_reqs],
+                                dtype=torch.int32).to(self.device)
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,
