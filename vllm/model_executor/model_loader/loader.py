@@ -81,7 +81,7 @@ def device_loading_context(module: torch.nn.Module,
             original_device_states[name] = p.device
             # Disable for SPMD for now, may need to hack target device to be cpu
             # for spmd path.
-            # p.data = p.data.to(target_device)
+            p.data = p.data.to(target_device)
         # Parameters already on target device are not touched
 
     try:

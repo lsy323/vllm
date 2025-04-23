@@ -516,10 +516,10 @@ class TPUModelRunner:
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
             self.input_batch.block_table.get_cpu_tensor()[:num_reqs])
-        block_tables = block_tables.to('xla')
+        block_tables = block_tables.to(self.device)
         query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1].to(
             self.device)
-        seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to('xla')
+        seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
 
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
@@ -541,7 +541,7 @@ class TPUModelRunner:
         # Padded to avoid recompiling when `num_reqs` varies.
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
         logger.info(f"check logits_indices in prepare inputs {logits_indices}")
-        logits_indices = logits_indices.to('xla')
+        logits_indices = logits_indices.to(self.device)
         return attn_metadata, logits_indices, padded_num_reqs
 
     def _scatter_placeholders(
@@ -852,22 +852,22 @@ class TPUModelRunner:
                                         dtype=self.dtype,
                                         device=self.device)
         else:
-            input_ids = torch.zeros((num_tokens), dtype=torch.int32).to('xla')
+            input_ids = torch.zeros((num_tokens), dtype=torch.int32).to(self.device)
             inputs_embeds = None
         actual_num_reqs = min(num_tokens, self.max_num_reqs)
-        position_ids = torch.zeros(num_tokens, dtype=torch.int32).to('xla')
-        slot_mapping = torch.zeros(num_tokens, dtype=torch.int64).to('xla')
+        position_ids = torch.zeros(num_tokens, dtype=torch.int32).to(self.device)
+        slot_mapping = torch.zeros(num_tokens, dtype=torch.int64).to(self.device)
         block_tables = torch.zeros(
             (self.max_num_reqs, self.block_table_cpu.shape[1]),
-            dtype=torch.int32).to('xla')
+            dtype=torch.int32).to(self.device)
         query_lens = [1] * self.max_num_reqs
         query_start_loc = torch.cumsum(torch.tensor([0] + query_lens,
                                                     dtype=torch.int32),
                                        dim=0,
-                                       dtype=torch.int32).to('xla')
+                                       dtype=torch.int32).to(self.device)
         context_lens = torch.ones((self.max_num_reqs, ),
-                                  dtype=torch.int32).to('xla')
-        num_seqs = torch.tensor([actual_num_reqs], dtype=torch.int32).to('xla')
+                                  dtype=torch.int32).to(self.device)
+        num_seqs = torch.tensor([actual_num_reqs], dtype=torch.int32).to(self.device)
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,
@@ -883,13 +883,6 @@ class TPUModelRunner:
         torch._dynamo.mark_dynamic(position_ids, 0)
         torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
-        import torch_xla.distributed.spmd as xs
-        num_devices = xr.global_runtime_device_count()
-        mesh_shape = (num_devices, 1)
-        device_ids = np.array(range(num_devices))
-        mesh = xs.Mesh(device_ids, mesh_shape, ('x', 'y'))
-        # xs.mark_sharding(input_ids, mesh, (None,))
-        # xs.mark_sharding(position_ids, mesh, (None,))
         with set_forward_context(attn_metadata, self.vllm_config, 0):
             out = self.model(input_ids=input_ids,
                              positions=position_ids,
@@ -1008,7 +1001,7 @@ class TPUModelRunner:
                     dtype = kv_cache_spec.dtype
 
                     tpu_kv_cache = torch.zeros(kv_cache_shape,
-                                               dtype=dtype).to('xla')
+                                               dtype=dtype).to(self.device)
 
                     kv_caches[layer_name] = tpu_kv_cache
                 else:
