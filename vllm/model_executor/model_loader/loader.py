@@ -449,36 +449,24 @@ class DefaultModelLoader(BaseModelLoader):
         device_config = vllm_config.device_config
         model_config = vllm_config.model_config
         target_device = torch.device(device_config.device)
+        # TODO read use_spmd from a env var.
         use_spmd = True
-
         if use_spmd:
-            import torch_xla.distributed.spmd as xs
-            from torch_xla import runtime as xr
-
-        if use_spmd:
-            # TODO: put in a central location for these config
-            xr.use_spmd()
-            num_devices = xr.global_runtime_device_count()
-            mesh_shape = (num_devices, 1)
-            device_ids = np.array(range(num_devices))
-            mesh = xs.Mesh(device_ids, mesh_shape, ('x', 'y'))
-
+            target_device = torch.device("cpu")
         with set_default_torch_dtype(model_config.dtype):
-            if not use_spmd:
-                with target_device:
-                    model = _initialize_model(vllm_config=vllm_config)
-            else:
-                # For SPMD we init model on CPU, then use mark_sharding to shard
-                # model and move shards to TPU.
+            with target_device:
                 model = _initialize_model(vllm_config=vllm_config)
+            # orig_device = target_device
+            # target_device = torch.device("cpu")
+            # # For SPMD we init model on CPU, then use mark_sharding to shard
+            # # model and move shards to TPU.
+            # model = _initialize_model(vllm_config=vllm_config)
 
             # Load full weights to CPU for now
             weights_to_load = {name for name, _ in model.named_parameters()}
             loaded_weights = model.load_weights(
                 self.get_all_weights(model_config, model))
-            model = model.to('xla')
-            logger.info(f"qwen model type {type(model)}")
-            # model.model = torch.compile(model.model, backend="openxla")
+            logger.info(f"model type {type(model)}")
             self.counter_after_loading_weights = time.perf_counter()
             logger.info(
                 "Loading weights took %.2f seconds",
@@ -494,6 +482,10 @@ class DefaultModelLoader(BaseModelLoader):
                         f"checkpoint: {weights_not_loaded}")
 
             _process_weights_after_loading(model, model_config, target_device)
+
+            if use_spmd:
+                model = model.to('xla')
+                model.model = torch.compile(model.model, backend="openxla")
 
         return model.eval()
 

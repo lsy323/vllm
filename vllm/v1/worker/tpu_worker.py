@@ -154,30 +154,12 @@ class TPUWorker:
             self.vllm_config.compilation_config.static_forward_context,
             runner_kv_caches)
 
-        xm.mark_step()
-        xm.wait_device_ops()
-        logger.info("run something")
-        x = torch.rand(4).to('xla')
-        import numpy as np
-        import torch_xla.distributed.spmd as xs
-        num_devices = xr.global_runtime_device_count()
-        mesh_shape = (num_devices, 1)
-        device_ids = np.array(range(num_devices))
-        mesh = xs.Mesh(device_ids, mesh_shape, ('x', 'y'))
-        xs.mark_sharding(x, mesh, (None, ))
-        x = torch.sin(x)
-        xm.mark_step()
-        xm.wait_device_ops()
-        logger.info(f"check x {x}")
-        # return 1024 * 128
-        logger.info("before dummy run")
         # `max_num_tokens >= max_num_batched_tokens` due to padding.
         self.model_runner._dummy_run(self.model_runner.max_num_tokens)
 
         # Synchronize before measuring the memory usage.
         xm.mark_step()
         xm.wait_device_ops()
-        logger.info("after dummy run")
 
         # During the profiling run, the model runs without KV cache. After
         # the profiling run, the model always runs with KV cache. Here we clear
@@ -261,7 +243,9 @@ def init_tpu_worker_distributed_environment(
     local_rank: int = -1,
 ) -> None:
     """Initialize the distributed environment."""
-
+    use_spmd = True
+    if use_spmd:
+        xr.use_spmd()
     # NOTE(woosuk): This is just to initialize the TP group and broadcast
     # the input objects on CPU. The all-reduce and all-gather ops on TPU
     # are invoked by `xm.all_reduce` and `xm.all_gather` which use their

@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from torch_xla import runtime as xr
-
 from vllm import LLM, SamplingParams
-
-xr.use_spmd()
 
 prompts = [
     "A robot may not injure a human being",
