@@ -200,13 +200,13 @@ class PallasAttentionBackendImpl(AttentionImpl):
         assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
 
         num_tokens, hidden_size = query.shape
-        # query = query.view(num_tokens, self.num_heads, self.head_size)
 
         if kv_cache.numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
             write_to_kv_cache(key, value, kv_cache, slot_mapping)
 
-        return query
+        # return query
+        query = query.view(num_tokens, self.num_heads, self.head_size)
 
         # query [16, 32, 128]
         # kv cache [277, 16, 64, 128]
