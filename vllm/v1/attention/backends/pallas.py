@@ -17,6 +17,41 @@ from vllm.utils import cdiv
 logger = init_logger(__name__)
 
 
+def ragged_paged_attention_runtime_check(
+        # q,  # [max_num_batched_tokens, num_q_heads, head_dim]
+        max_num_batched_tokens,
+        # kv_pages,  # [total_num_pages, page_size, num_combined_kv_heads, head_dim]
+        page_size,
+        kv_lens,  # i32[max_num_seqs]
+        page_indices,  # i32[max_num_seqs, pages_per_seq]
+        cu_q_lens,  # i32[max_num_seqs + 1]
+        num_seqs,  # i32[1]
+):
+    #   max_num_batched_tokens = q.shape[0]
+    #   page_size = kv_pages.shape[1]
+    max_num_seqs, pages_per_seq = page_indices.shape
+    if num_seqs[0] > max_num_seqs:
+        raise ValueError(
+            f"{num_seqs[0]=} must be less or equal to {max_num_seqs=}")
+    max_kv_len = torch.max(kv_lens)
+    min_pages_per_seq = (max_kv_len + page_size - 1) // page_size
+    if pages_per_seq < min_pages_per_seq:
+        raise ValueError(
+            f"{pages_per_seq=} must be greater or equal to"
+            f" {min_pages_per_seq=} given {max_kv_len=} and {page_size=}.")
+    if cu_q_lens[num_seqs[0]] > max_num_batched_tokens:
+        raise ValueError(
+            f"Total q tokens {cu_q_lens[num_seqs[0]]} must be less or equal to"
+            f" {max_num_batched_tokens=}.")
+    for i in range(num_seqs[0]):
+        q_len = cu_q_lens[i + 1] - cu_q_lens[i]
+        kv_len = kv_lens[i]
+        if q_len > kv_len:
+            raise ValueError(
+                f"{q_len=} must be less or equal to {kv_len=} at sequence {i}."
+            )
+
+
 class PallasAttentionBackend(AttentionBackend):
 
     @staticmethod
@@ -163,13 +198,22 @@ class PallasAttentionBackendImpl(AttentionImpl):
             return output
 
         assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
+
         num_tokens, hidden_size = query.shape
-        query = query.view(num_tokens, self.num_heads, self.head_size)
+        # query = query.view(num_tokens, self.num_heads, self.head_size)
 
         if kv_cache.numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
             write_to_kv_cache(key, value, kv_cache, slot_mapping)
 
+        return query
+
+        # query [16, 32, 128]
+        # kv cache [277, 16, 64, 128]
+        # context_lens tensor([1, 1, 1, 1, 1, 1, 1, 1], device='xla:0', dtype=torch.int32)
+        # block_tables torch.Size([8, 64]
+        # query_start_loc torch.Size([9])
+        # num_seqs torch.tensor([8])
         output = torch.ops.xla.ragged_paged_attention(
             query,
             kv_cache,
@@ -188,7 +232,10 @@ class PallasAttentionBackendImpl(AttentionImpl):
             sliding_window=self.sliding_window,
             soft_cap=self.logits_soft_cap,
         )
-
+        # output = output.reshape(-1, hidden_size)
+        # output_placeholder[:output.shape[0]] = output[:]
+        # output = output_placeholder
+        # return output_placeholder
         return output.reshape(num_tokens, hidden_size)
 
 

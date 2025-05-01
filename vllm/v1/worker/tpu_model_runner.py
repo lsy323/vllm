@@ -27,8 +27,9 @@ from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
-from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
-                                               PallasMetadata)
+from vllm.v1.attention.backends.pallas import (
+    PallasAttentionBackend, PallasMetadata,
+    ragged_paged_attention_runtime_check)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec,
@@ -134,7 +135,7 @@ class TPUModelRunner:
         # to avoid dynamic shapes. Also, avoid suboptimal alignment.
         self.max_num_reqs = max(scheduler_config.max_num_seqs, MIN_NUM_SEQS)
         self.num_tokens_paddings = _get_token_paddings(
-            min_token_size=16,
+            min_token_size=8,
             max_token_size=scheduler_config.max_num_batched_tokens,
             padding_gap=envs.VLLM_TPU_BUCKET_PADDING_GAP)
         # In case `max_num_tokens < max(num_tokens_paddings)` use the actual
@@ -563,11 +564,21 @@ class TPUModelRunner:
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
             self.input_batch.block_table.get_cpu_tensor()[:num_reqs])
+        block_tables_cpu = block_tables
         block_tables = block_tables.to(self.device)
-        query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1].to(
-            self.device)
-        seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
+        query_start_loc_cpu = self.query_start_loc_cpu[:self.max_num_reqs + 1]
+        query_start_loc = query_start_loc_cpu.to(self.device)
+        seq_lens_cpu = self.seq_lens_cpu[:self.max_num_reqs]
+        seq_lens = seq_lens_cpu.to(self.device)
 
+        torch.set_printoptions(profile='full')
+        logger.info(
+            f"check pallas metadata: block_tables {block_tables} block table shape \
+            {block_tables.shape}, seq_lens {seq_lens} num_reqs {num_reqs}")
+        logger.info(
+            f"query_start_loc: {query_start_loc}, query_start_loc shape {query_start_loc.shape}"
+        )
+        torch.set_printoptions(profile='default')
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,
@@ -748,6 +759,7 @@ class TPUModelRunner:
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
+        logger.info(f"in execute model, if it's mm {self.is_multimodal_model}")
         # Update cached state
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
@@ -769,6 +781,28 @@ class TPUModelRunner:
         xm.mark_step()
         num_reqs = self.input_batch.num_reqs
         # Run the decoder
+        logger.info(f"check input_ids {input_ids}")
+        torch.set_printoptions(profile='full')
+        logger.info(
+            f"check position ids {self.position_ids}, inputs_embeds shape {inputs_embeds.shape}"
+        )
+        torch.set_printoptions(profile='default')
+
+        if len(self.kv_caches) > 0:
+            num_batched_tokens = self.position_ids.shape[0]
+            page_size = self.kv_caches[0].shape[1]
+            kv_lens = attn_metadata.context_lens.cpu()
+            page_indices = attn_metadata.block_tables.cpu()
+            cu_q_lens = attn_metadata.query_start_loc.cpu()
+            num_seqs = attn_metadata.num_seqs.cpu()
+            ragged_paged_attention_runtime_check(num_batched_tokens, page_size,
+                                                 kv_lens, page_indices,
+                                                 cu_q_lens, num_seqs)
+            logger.info("runtime check passed")
+
+        dummy_inputs_embds = torch.zeros_like(inputs_embeds).to(
+            inputs_embeds.dtype).to(inputs_embeds.device)
+
         with set_forward_context(
                 attn_metadata,
                 self.vllm_config,
@@ -776,11 +810,25 @@ class TPUModelRunner:
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.position_ids,
-                inputs_embeds=inputs_embeds,
+                # inputs_embeds=inputs_embeds,
+                inputs_embeds=dummy_inputs_embds,
             )
+
+        xm.mark_step()
+        xm.wait_device_ops()
+        logger.info("finish computing hidden")
+        logger.info(f"hidden_states shape {hidden_states.shape}")
+        hidden_states_cpu = hidden_states.cpu()
+        logger.info("move hidden state to cpu")
         hidden_states = self.select_hidden_states(hidden_states,
                                                   logits_indices)
+        xm.mark_step()
+        xm.wait_device_ops()
+        logger.info("finish select_hidden_states")
         logits = self.compute_logits(hidden_states)
+        xm.mark_step()
+        xm.wait_device_ops()
+        logger.info("finish compute_logits")
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
             from_input_batch(self.input_batch, padded_num_reqs, self.device)
         if scheduler_output.grammar_bitmask is not None:
@@ -791,8 +839,12 @@ class TPUModelRunner:
                                             arange)
         selected_token_ids = self.sample_from_logits(logits,
                                                      tpu_sampling_metadata)
+        xm.mark_step()
+        xm.wait_device_ops()
+        logger.info("finish sample_from_logits")
         # Remove padding on cpu and keep dynamic op outside of xla graph.
         selected_token_ids = selected_token_ids.cpu()[:num_reqs]
+        logger.info("finish move selected token to cpu")
 
         # Update the cache state concurrently. Code above will not block until
         # we use `selected_token_ids`. Add mark_step if post-processing changes
@@ -865,11 +917,13 @@ class TPUModelRunner:
             logprobs=None,
             prompt_logprobs_dict=prompt_logprobs_dict,
         )
+        xm.mark_step()
+        xm.wait_device_ops()
 
         # Check there are no new graphs compiled - all the graphs should be
         # captured and compiled during warm up.
         self._verify_num_xla_graphs("execute_model")
-
+        logger.info("finish execute model")
         return model_runner_output
 
     def load_model(self) -> None:
@@ -937,6 +991,16 @@ class TPUModelRunner:
             context_lens=context_lens,
             query_start_loc=query_start_loc,
             num_seqs=num_seqs,
+        )
+        logger.info(f"check num_tokens {num_tokens}")
+        logger.info(f"check pallas metadata: block table shape \
+            {block_tables.shape}, context_lens {context_lens} num_seqs {num_seqs}, \
+            query_start_loc shape {query_start_loc.shape}")
+        logger.info(f"check input_id {input_ids}")
+        logger.info(f"check pallas metadata: position_ids shape \
+            {position_ids.shape}, inputs_embeds {inputs_embeds.shape}")
+        logger.info(
+            f"check kv cache shape {self.model.language_model.model.layers[0].self_attn.attn.kv_cache[0].shape}"
         )
 
         if self.is_multimodal_model:

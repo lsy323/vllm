@@ -29,7 +29,6 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.attention import Attention
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -287,7 +286,7 @@ class LlamaDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-@support_torch_compile
+# @support_torch_compile
 class LlamaModel(nn.Module):
 
     def __init__(self,
@@ -360,8 +359,10 @@ class LlamaModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         aux_hidden_states = []
+        # for idx, layer in enumerate(
+        #         self.layers[self.start_layer:self.end_layer]):
         for idx, layer in enumerate(
-                self.layers[self.start_layer:self.end_layer]):
+                self.layers[self.start_layer:self.start_layer + 1]):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)

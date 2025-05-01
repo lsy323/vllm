@@ -190,7 +190,9 @@ class TPUWorker:
         usable_memory_size = int(total_memory_size *
                                  self.cache_config.gpu_memory_utilization)
         tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
-
+        logger.info(
+            f"profiled: {profiled}, usable_memory_size {usable_memory_size}, tpu_kv_cache_bytes {tpu_kv_cache_bytes}"
+        )
         return int(tpu_kv_cache_bytes)
 
     def execute_model(
@@ -215,8 +217,8 @@ class TPUWorker:
         self.model_runner.load_model()
 
     def compile_or_warm_up_model(self) -> None:
-        if not self.model_config.enforce_eager:
-            self.model_runner.capture_model()
+        # if not self.model_config.enforce_eager:
+        #     self.model_runner.capture_model()
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
