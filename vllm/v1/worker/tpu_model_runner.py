@@ -1060,7 +1060,7 @@ class TPUModelRunner:
     def select_hidden_states(self, hidden_states, indices_do_sample):
         return hidden_states[indices_do_sample]
 
-    # @torch.compile(backend="openxla")
+    @torch.compile(backend="openxla")
     def sample_from_hidden(
         self,
         sample_hidden_states: torch.Tensor,
