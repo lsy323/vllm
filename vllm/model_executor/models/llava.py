@@ -698,7 +698,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             "multimodal_embeddings": multimodal_embeddings,
             "image_token_index": self.config.image_token_index,
         }
-        torch.save(dump_dict, "/home/lsiyuan/mm_dump/mm_embedding_dict.pt")
+        # torch.save(dump_dict, "/home/lsiyuan/mm_dump/mm_embedding_dict.pt")
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
