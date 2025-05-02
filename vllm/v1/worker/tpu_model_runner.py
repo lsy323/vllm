@@ -741,9 +741,11 @@ class TPUModelRunner:
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             if mm_embeds:
+                logger.info("mm_embeds is not empty")
                 inputs_embeds = self.model.get_input_embeddings(
                     input_ids, mm_embeds)
             else:
+                logger.info("mm_embeds is empty")
                 inputs_embeds = self.model.get_input_embeddings(input_ids)
             return None, inputs_embeds
         else:
@@ -773,12 +775,29 @@ class TPUModelRunner:
         else:
             mm_embeds = []
         xm.mark_step()
+        xm.wait_device_ops()
+        logger.info("before move mm embed to cpu")
+        inputs_embeds_cpu = []
+        for mm_embed in mm_embeds:
+            inputs_embeds_cpu.append(mm_embed.cpu())
+        logger.info("after move mm embed to cpu")
+        logger.info(f"check len of mm_embed {len(mm_embeds)}")
+        for i, mm_embed in enumerate(mm_embeds):
+            logger.info(
+                f"check mm_embed {i} shape {mm_embed.shape}, dtype {mm_embed.dtype}"
+            )
+
         # Prepare inputs
         attn_metadata, logits_indices, padded_num_reqs = self._prepare_inputs(
             scheduler_output)
         input_ids, inputs_embeds = self._get_model_inputs(
             self.input_ids, mm_embeds)
         xm.mark_step()
+        xm.wait_device_ops()
+        logger.info("before move input embed to cpu")
+        inputs_embeds_cpu = inputs_embeds.cpu()
+        logger.info("after move input embed to cpu")
+
         num_reqs = self.input_batch.num_reqs
         # Run the decoder
         logger.info(f"check input_ids {input_ids}")

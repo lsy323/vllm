@@ -18,6 +18,7 @@ from transformers.models.pixtral import PixtralProcessor
 from vllm.config import VllmConfig
 from vllm.inputs import InputProcessingContext
 from vllm.jsontree import json_map_leaves
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
@@ -42,6 +43,8 @@ from .siglip import SiglipVisionModel
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 from .vision import get_vision_encoder_info
+
+logger = init_logger(__name__)
 
 
 class LlavaImagePixelInputs(TypedDict):
@@ -673,6 +676,29 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        logger.info(
+            f"in llava get_input_embeddings inputs_embeds shape {inputs_embeds.shape}"
+        )
+        logger.info(
+            f"in llava get_input_embeddings input_ids shape {input_ids.shape}")
+        logger.info("in llava before move inputs_embeds to cpu")
+        inputs_embeds_cpu = inputs_embeds.cpu()
+        logger.info("in llava after move inputs_embeds to cpu")
+        logger.info(f"check image token index {self.config.image_token_index}")
+        input_id_cpu = input_ids.cpu()
+        torch.set_printoptions(profile='full')
+        logger.info(f"check input_id_cpu {input_id_cpu}")
+        if multimodal_embeddings is not None:
+            for embedding in multimodal_embeddings:
+                logger.info(f"check embedding shape {embedding.shape}")
+        torch.set_printoptions(profile='default')
+        dump_dict = {
+            "input_ids": input_ids,
+            "inputs_embeds": inputs_embeds,
+            "multimodal_embeddings": multimodal_embeddings,
+            "image_token_index": self.config.image_token_index,
+        }
+        torch.save(dump_dict, "/home/lsiyuan/mm_dump/mm_embedding_dict.pt")
         if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
