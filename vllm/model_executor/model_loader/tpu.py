@@ -8,8 +8,9 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.distributed.tpu_distributed_utils import shard_model
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.loader import (
-    DefaultModelLoader, _initialize_model, _process_weights_after_loading)
+    _initialize_model, _process_weights_after_loading)
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
