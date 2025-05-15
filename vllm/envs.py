@@ -766,6 +766,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Lower Pytorch to TPU via Torchax.
     "VLLM_TORCHAX_ENABLED":
+    lambda: bool(int(os.getenv("VLLM_TORCHAX_ENABLED", "0"))),
 
     # If set, allow insecure serialization using pickle.
     # This is useful for environments where it is deemed safe to use the
@@ -784,7 +785,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALL2ALL_BACKEND":
     lambda: os.getenv("VLLM_ALL2ALL_BACKEND", "naive"),
 }
-
 
 
 def __getattr__(name: str):
