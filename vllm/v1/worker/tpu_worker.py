@@ -8,8 +8,10 @@ import torch.distributed
 import torch.nn as nn
 
 import vllm.envs as envs
+
 if envs.VLLM_TORCHAX_ENABLED:
-    import jax 
+    import jax
+
 import torch_xla.core.xla_model as xm
 import torch_xla.debug.profiler as xp
 import torch_xla.runtime as xr
@@ -19,6 +21,7 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -86,6 +89,10 @@ class TPUWorker:
         if self.model_config.seed is None:
             self.model_config.seed = 0
 
+        if vllm_config.lora_config is not None:
+            raise NotImplementedError(
+                "The V1 TPU backend doesn't support LoRA serving")
+
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
         # Note: Currently the XLA compiler wrongly uses 2D ring strategy on 1D
@@ -113,12 +120,12 @@ class TPUWorker:
 
         # Set random seed.
         set_random_seed(self.model_config.seed)
-        
+
         if envs.VLLM_TORCHAX_ENABLED:
             rank = jax.process_index()
         else:
             rank = xr.global_ordinal()
-        
+
         if self.model_config.seed is not None:
             if not envs.VLLM_TORCHAX_ENABLED:
                 xm.set_rng_state(self.model_config.seed, self.device)
@@ -231,6 +238,9 @@ class TPUWorker:
             else:
                 xp.stop_trace()
 
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.model_runner.add_lora(lora_request)
+
     def load_model(self) -> None:
         self.model_runner.load_model()
 
@@ -277,4 +287,5 @@ def init_tpu_worker_distributed_environment(
         backend="gloo",
     )
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size)
+                                      parallel_config.pipeline_parallel_size,
+                                      parallel_config.enable_expert_parallel)
