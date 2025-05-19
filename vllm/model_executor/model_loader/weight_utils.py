@@ -21,7 +21,6 @@ from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
-import vllm.envs as envs
 from vllm.config import LoadConfig, ModelConfig
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
@@ -469,13 +468,13 @@ def safetensors_weights_iterator(
             for name in f.keys():  # noqa: SIM118
                 # Torchax does not support loading
                 # safetensors files.
-                if envs.VLLM_TORCHAX_ENABLED:
-                    import torchax
-                    torchax.disable_globally()
+                # if envs.VLLM_TORCHAX_ENABLED:
+                #     import torchax
+                #     torchax.disable_globally()
                 param = f.get_tensor(name)
-                if envs.VLLM_TORCHAX_ENABLED:
-                    torchax.enable_globally()
-                    param = param.to("jax")
+                # if envs.VLLM_TORCHAX_ENABLED:
+                #     torchax.enable_globally()
+                #     param = param.to("jax")
                 yield name, param
 
 

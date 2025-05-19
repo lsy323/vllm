@@ -15,7 +15,7 @@ import vllm.envs as envs
 
 if envs.VLLM_TORCHAX_ENABLED:
     import torchax
-    torchax.enable_globally()
+    # torchax.enable_globally()
     import jax
 
 import torch_xla.core.xla_model as xm
@@ -28,6 +28,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader.tpu import TPUModelLoader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
                                     PlaceholderRange)
@@ -505,6 +506,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
+        # logger.info(f"check self.input_batch.token_ids_cpu_tensor {self.input_batch.token_ids_cpu_tensor}")
+        # logger.info(f"check input_ids_cpu {self.input_ids_cpu[:total_num_scheduled_tokens]}")
         torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
                            0,
                            torch.from_numpy(token_indices),
@@ -764,6 +767,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
+        torchax.enable_globally()
         # Update cached state
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
@@ -789,6 +793,17 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 attn_metadata,
                 self.vllm_config,
                 num_tokens=scheduler_output.total_num_scheduled_tokens):
+            logger.info(f"check attn_metadata {attn_metadata}")
+            logger.info(
+                f"num_tokens {scheduler_output.total_num_scheduled_tokens}")
+            logger.info(f"check input_ids {input_ids}")
+            logger.info(f"check input_ids shape {input_ids.shape}")
+            logger.info(f"check input_ids dtype {input_ids.dtype}")
+            logger.info(f"check inputs_embeds {inputs_embeds}")
+            logger.info(
+                f"check self.position_ids shape {self.position_ids.shape}")
+            logger.info(
+                f"check self.position_ids dtype {self.position_ids.dtype}")
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.position_ids,
@@ -895,7 +910,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Check there are no new graphs compiled - all the graphs should be
         # captured and compiled during warm up.
         self._verify_num_xla_graphs("execute_model")
-
+        torchax.disable_globally()
         return model_runner_output
 
     def load_model(self) -> None:
@@ -914,11 +929,16 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             xm_tp_rank = jax.process_index()
         else:
             xm_tp_rank = xr.global_ordinal()
-        with patch(
-                "vllm.model_executor.layers.vocab_parallel_embedding."
-                "get_tensor_model_parallel_rank",
-                return_value=xm_tp_rank):
-            model = get_model(vllm_config=self.vllm_config)
+        if envs.VLLM_TORCHAX_ENABLED:
+            tpu_loader = TPUModelLoader(
+                load_config=self.vllm_config.load_config)
+            model = tpu_loader.load_model(None, vllm_config=self.vllm_config)
+        else:
+            with patch(
+                    "vllm.model_executor.layers.vocab_parallel_embedding."
+                    "get_tensor_model_parallel_rank",
+                    return_value=xm_tp_rank):
+                model = get_model(vllm_config=self.vllm_config)
         if self.lora_config is not None:
             model = self.load_lora_model(model, self.model_config,
                                          self.scheduler_config,
@@ -933,68 +953,71 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.no_grad()
     def _dummy_run(self, num_tokens: int) -> None:
-        if self.is_multimodal_model:
-            input_ids = None
-            inputs_embeds = torch.zeros((num_tokens, self.hidden_size),
-                                        dtype=self.dtype,
+        env = torchax.default_env()
+        with env:
+            if self.is_multimodal_model:
+                input_ids = None
+                inputs_embeds = torch.zeros((num_tokens, self.hidden_size),
+                                            dtype=self.dtype,
+                                            device=self.device)
+            else:
+                input_ids = torch.zeros((num_tokens),
+                                        dtype=torch.int32,
                                         device=self.device)
-        else:
-            input_ids = torch.zeros((num_tokens),
+                inputs_embeds = None
+            actual_num_reqs = min(num_tokens, self.max_num_reqs)
+            position_ids = torch.zeros(num_tokens,
+                                       dtype=torch.int32,
+                                       device=self.device)
+            slot_mapping = torch.zeros(num_tokens,
+                                       dtype=torch.int64,
+                                       device=self.device)
+            block_tables = torch.zeros(
+                (self.max_num_reqs, self.block_table_cpu.shape[1]),
+                dtype=torch.int32,
+                device=self.device)
+            query_lens = [1] * self.max_num_reqs
+            query_start_loc = torch.cumsum(torch.tensor([0] + query_lens,
+                                                        dtype=torch.int32),
+                                           dim=0,
+                                           dtype=torch.int32).to(self.device)
+            context_lens = torch.ones((self.max_num_reqs, ),
+                                      dtype=torch.int32,
+                                      device=self.device)
+            num_seqs = torch.tensor([actual_num_reqs],
                                     dtype=torch.int32,
                                     device=self.device)
-            inputs_embeds = None
-        actual_num_reqs = min(num_tokens, self.max_num_reqs)
-        position_ids = torch.zeros(num_tokens,
-                                   dtype=torch.int32,
-                                   device=self.device)
-        slot_mapping = torch.zeros(num_tokens,
-                                   dtype=torch.int64,
-                                   device=self.device)
-        block_tables = torch.zeros(
-            (self.max_num_reqs, self.block_table_cpu.shape[1]),
-            dtype=torch.int32,
-            device=self.device)
-        query_lens = [1] * self.max_num_reqs
-        query_start_loc = torch.cumsum(torch.tensor([0] + query_lens,
-                                                    dtype=torch.int32),
-                                       dim=0,
-                                       dtype=torch.int32).to(self.device)
-        context_lens = torch.ones((self.max_num_reqs, ),
-                                  dtype=torch.int32,
-                                  device=self.device)
-        num_seqs = torch.tensor([actual_num_reqs],
-                                dtype=torch.int32,
-                                device=self.device)
-        attn_metadata = PallasMetadata(
-            slot_mapping=slot_mapping,
-            block_tables=block_tables,
-            context_lens=context_lens,
-            query_start_loc=query_start_loc,
-            num_seqs=num_seqs,
-        )
+            attn_metadata = PallasMetadata(
+                slot_mapping=slot_mapping,
+                block_tables=block_tables,
+                context_lens=context_lens,
+                query_start_loc=query_start_loc,
+                num_seqs=num_seqs,
+            )
 
-        if self.is_multimodal_model:
-            torch._dynamo.mark_dynamic(inputs_embeds, 0)
-        else:
-            torch._dynamo.mark_dynamic(input_ids, 0)
-        torch._dynamo.mark_dynamic(position_ids, 0)
-        torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
+            if self.is_multimodal_model:
+                torch._dynamo.mark_dynamic(inputs_embeds, 0)
+            else:
+                torch._dynamo.mark_dynamic(input_ids, 0)
+            torch._dynamo.mark_dynamic(position_ids, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
-        layer_names = get_layers_from_vllm_config(self.vllm_config,
-                                                  Attention).keys()
-        per_layer_attn_metadata = {
-            layer_name: attn_metadata
-            for layer_name in layer_names
-        }
+            layer_names = get_layers_from_vllm_config(self.vllm_config,
+                                                      Attention).keys()
+            per_layer_attn_metadata = {
+                layer_name: attn_metadata
+                for layer_name in layer_names
+            }
 
-        with self.maybe_dummy_run_with_lora(
-                self.lora_config,
-                np.array([num_tokens], dtype=np.int32)), set_forward_context(
-                    per_layer_attn_metadata, self.vllm_config, 0):
-            out = self.model(input_ids=input_ids,
-                             positions=position_ids,
-                             inputs_embeds=inputs_embeds)
-        self._hidden_states_dtype = out.dtype
+            with self.maybe_dummy_run_with_lora(
+                    self.lora_config,
+                    np.array([num_tokens],
+                             dtype=np.int32)), set_forward_context(
+                                 per_layer_attn_metadata, self.vllm_config, 0):
+                out = self.model(input_ids=input_ids,
+                                 positions=position_ids,
+                                 inputs_embeds=inputs_embeds)
+            self._hidden_states_dtype = out.dtype
 
     def _precompile_mm_encoder(self) -> None:
         # Pre-compile MM encoder for all supported data modalities.
@@ -1185,13 +1208,15 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         """
         Precompile all the subgraphs with possible input shapes.
         """
-        self._precompile_mm_encoder()
-        self._precompile_backbone()
-        self._precompile_select_hidden_states()
-        self._precompile_compute_logits()
-        self._precompile_structured_decoding()
-        self._precompile_sample_from_logits()
-        self._precompile_gather_logprobs()
+        env = torchax.default_env()
+        with env:
+            self._precompile_mm_encoder()
+            self._precompile_backbone()
+            self._precompile_select_hidden_states()
+            self._precompile_compute_logits()
+            self._precompile_structured_decoding()
+            self._precompile_sample_from_logits()
+            self._precompile_gather_logprobs()
 
     def profile_run(
         self,
@@ -1259,49 +1284,52 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
-        if len(kv_cache_config.kv_cache_groups) > 1:
-            raise NotImplementedError(
-                "Hybrid models with more than one KV cache type are not "
-                "supported yet.")
+        env = torchax.default_env()
+        with env:
+            if len(kv_cache_config.kv_cache_groups) > 1:
+                raise NotImplementedError(
+                    "Hybrid models with more than one KV cache type are not "
+                    "supported yet.")
 
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.max_model_len,
-            max_num_batched_tokens=self.max_num_tokens,
-            device=self.device,
-            pin_memory=self.pin_memory,
-            vocab_size=self.model_config.get_vocab_size(),
-            kv_cache_config=kv_cache_config,
-        )
-        assert self.block_table_cpu.dtype == self.input_batch.block_table[
-            0].get_cpu_tensor().dtype
+            self.input_batch = InputBatch(
+                max_num_reqs=self.max_num_reqs,
+                max_model_len=self.max_model_len,
+                max_num_batched_tokens=self.max_num_tokens,
+                device=self.device,
+                pin_memory=self.pin_memory,
+                vocab_size=self.model_config.get_vocab_size(),
+                kv_cache_config=kv_cache_config,
+            )
+            assert self.block_table_cpu.dtype == self.input_batch.block_table[
+                0].get_cpu_tensor().dtype
 
-        kv_caches: dict[str, torch.Tensor] = {}
+            kv_caches: dict[str, torch.Tensor] = {}
 
-        for kv_cache_group in kv_cache_config.kv_cache_groups:
-            kv_cache_spec = kv_cache_group.kv_cache_spec
-            for layer_name in kv_cache_group.layer_names:
-                tensor_config = kv_cache_config.tensors[layer_name]
-                assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
-                num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
-                if isinstance(kv_cache_spec, AttentionSpec):
-                    kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape(
-                        num_blocks, kv_cache_spec.block_size,
-                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
-                    dtype = kv_cache_spec.dtype
+            for kv_cache_group in kv_cache_config.kv_cache_groups:
+                kv_cache_spec = kv_cache_group.kv_cache_spec
+                for layer_name in kv_cache_group.layer_names:
+                    tensor_config = kv_cache_config.tensors[layer_name]
+                    assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
+                    if isinstance(kv_cache_spec, AttentionSpec):
+                        kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape(
+                            num_blocks, kv_cache_spec.block_size,
+                            kv_cache_spec.num_kv_heads,
+                            kv_cache_spec.head_size)
+                        dtype = kv_cache_spec.dtype
 
-                    tpu_kv_cache = torch.zeros(kv_cache_shape,
-                                               dtype=dtype,
-                                               device=self.device)
+                        tpu_kv_cache = torch.zeros(kv_cache_shape,
+                                                   dtype=dtype,
+                                                   device=self.device)
 
-                    kv_caches[layer_name] = tpu_kv_cache
-                else:
-                    raise NotImplementedError
+                        kv_caches[layer_name] = tpu_kv_cache
+                    else:
+                        raise NotImplementedError
 
-        bind_kv_cache(
-            kv_caches,
-            self.vllm_config.compilation_config.static_forward_context,
-            self.kv_caches)
+            bind_kv_cache(
+                kv_caches,
+                self.vllm_config.compilation_config.static_forward_context,
+                self.kv_caches)
 
     def reset_dynamo_cache(self):
         if self.is_multimodal_model:

@@ -178,7 +178,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
         assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         num_tokens, hidden_size = query.shape
-        query = query.view(num_tokens, self.num_heads, self.head_size)
+        query = query.reshape(num_tokens, self.num_heads, self.head_size)
 
         if kv_cache.numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
@@ -223,8 +223,8 @@ def write_to_kv_cache(
     _, _, num_combined_kv_heads, head_size = kv_cache.shape
     num_kv_heads = num_combined_kv_heads // 2
 
-    key = key.view(-1, num_kv_heads, head_size)
-    value = value.view(-1, num_kv_heads, head_size)
+    key = key.reshape(-1, num_kv_heads, head_size)
+    value = value.reshape(-1, num_kv_heads, head_size)
 
     kv = torch.cat([key, value], axis=-1).reshape(-1, num_combined_kv_heads,
                                                   head_size)

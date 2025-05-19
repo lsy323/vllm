@@ -3,7 +3,7 @@ import time
 
 import torch
 import torch.nn as nn
-import torch_xla.core.xla_model as xm
+import torchax
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -59,14 +59,14 @@ class TPUModelLoader(DefaultModelLoader):
 
         counter_before_partition = time.perf_counter()
         model = model.eval()
-        model = model.to('xla')
+        # model = model.to('xla')
         # shard_model(model, mesh)
         counter_after_partition = time.perf_counter()
         logger.info("Partition model took %.2f seconds",
                     counter_after_partition - counter_before_partition)
 
         # Ensure the model is properly loaded.
-        self._check_model_is_loaded(mesh, model)
+        # self._check_model_is_loaded(mesh, model)
 
         # Need to torch compile after model sharding are done. Because the
         # compiler hints ('xs.mark_sharding') are torch ops.
@@ -75,24 +75,27 @@ class TPUModelLoader(DefaultModelLoader):
         # else:
         #     model.language_model.model = \
         #         torch.compile(model.language_model.model, backend="openxla")
+        env = torchax.default_env()
+        with env:
+            model = model.to('jax')
         return model
 
-    def _check_model_is_loaded(self, mesh, model):
-        """
-        Ensure the model is properly loaded.
-        1. All model parameters and buffers are on XLA device.
-        2. Non-SPMD friendly layers are replaced as expected.
-        """
-        device = xm.xla_device()
-        device_type = str(device.type)
+    # def _check_model_is_loaded(self, mesh, model):
+    #     """
+    #     Ensure the model is properly loaded.
+    #     1. All model parameters and buffers are on XLA device.
+    #     2. Non-SPMD friendly layers are replaced as expected.
+    #     """
+    #     device = xm.xla_device()
+    #     device_type = str(device.type)
 
-        # Check parameters
-        for name, param in model.named_parameters():
-            assert param.device.type == device_type, f"Parameter {name} is on \
-                {param.device.type} instead of {device_type}"
+    #     # Check parameters
+    #     for name, param in model.named_parameters():
+    #         assert param.device.type == device_type, f"Parameter {name} is on \
+    #             {param.device.type} instead of {device_type}"
 
-        # Check buffers
-        for name, buffer in model.named_buffers():
-            assert buffer.device.type == device_type, \
-                f"Buffer {name} is on {buffer.device.type} instead of \
-                    {device_type}"
+    #     # Check buffers
+    #     for name, buffer in model.named_buffers():
+    #         assert buffer.device.type == device_type, \
+    #             f"Buffer {name} is on {buffer.device.type} instead of \
+    #                 {device_type}"

@@ -1,11 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-import gc
 import tempfile
 
-import numpy as np
 import pytest
-import torch_xla.distributed.spmd as xs
-import torch_xla.runtime as xr
 
 from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
@@ -31,20 +27,6 @@ def _setup_environment(model):
     return vllm_config
 
 
-MESH = None
-
-
-def _get_spmd_mesh():
-    global MESH
-    if MESH is None:
-        xr.use_spmd()
-        num_devices = xr.global_runtime_device_count()
-        mesh_shape = (num_devices, 1)
-        device_ids = np.array(range(num_devices))
-        MESH = xs.Mesh(device_ids, mesh_shape, ('x', 'y'))
-    return MESH
-
-
 @pytest.mark.parametrize(
     "model",
     [
@@ -53,17 +35,18 @@ def _get_spmd_mesh():
         # "meta-llama/Llama-3.1-70B-Instruct",
     ])
 def test_tpu_model_loader(model):
-    # Skip the 70B test if there are less than 8 chips
-    # TODO: Query using torch xla API, the query API is not working
-    # with SPMD now. However, This test is running under SPMD mode.
-    if '70B' in model and xr.global_runtime_device_count() < 8:
-        pytest.skip(
-            "Skipping 70B model if the TPU VM has less than 8 chips to \
-                     avoid OOM.")
-
     vllm_config = _setup_environment(model)
     loader = TPUModelLoader(load_config=vllm_config.load_config)
-    mesh = _get_spmd_mesh()
-    model = loader.load_model(mesh, vllm_config)
-    del model
-    gc.collect()
+    model = loader.load_model(None, vllm_config)
+
+    import torchax
+
+    # torchax.enable_globally()
+    env = torchax.default_env()
+    with env:
+        model = model.to('jax')
+    print(model)
+    for name, param in model.named_parameters():
+        print(f"name {name}: param {param}")
+
+    # breakpoint()
