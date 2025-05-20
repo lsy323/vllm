@@ -182,7 +182,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
         if kv_cache.numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
-            write_to_kv_cache(key, value, kv_cache, slot_mapping)
+            kv_cache = write_to_kv_cache(key, value, kv_cache, slot_mapping)
 
         output = torch.ops.xla.ragged_paged_attention(
             query,
@@ -211,7 +211,7 @@ def write_to_kv_cache(
     value: torch.Tensor,
     kv_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
-) -> None:
+) -> torch.Tensor:
     """ Write the key and values to the KV cache.
 
     Args:
@@ -220,7 +220,7 @@ def write_to_kv_cache(
         kv_cache = [num_blocks, block_size, num_kv_heads * 2, head_size]
 
     """
-    _, _, num_combined_kv_heads, head_size = kv_cache.shape
+    num_blocks, block_size, num_combined_kv_heads, head_size = kv_cache.shape
     num_kv_heads = num_combined_kv_heads // 2
 
     key = key.reshape(-1, num_kv_heads, head_size)
@@ -231,5 +231,8 @@ def write_to_kv_cache(
 
     torch.ops.xla.dynamo_set_buffer_donor_(kv_cache, True)
 
-    kv_cache = kv_cache.flatten(0, 1)
-    kv_cache.index_copy_(0, slot_mapping, kv)
+    kv_cache = kv_cache.reshape(-1, num_combined_kv_heads, head_size)
+    kv_cache = kv_cache.index_copy(0, slot_mapping, kv)
+    kv_cache = kv_cache.reshape(num_blocks, block_size, num_combined_kv_heads,
+                                head_size)
+    return kv_cache

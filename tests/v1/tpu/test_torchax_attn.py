@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+import functools
 import tempfile
 
 import pytest
 import torch
+import torch.utils._pytree as pytree
 import torchax
-from torchax.interop import jax_jit
+from torchax.interop import extract_all_buffers, jax_jit
 
 from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, set_current_vllm_config
@@ -69,12 +71,24 @@ class M(torch.nn.Module):
 
 def wrapped_module(m):
 
-    @jax_jit
-    def func(weights, inputs, kv_cache):
-        m.attn.kv_cache = kv_cache
-        res = torch.func.functional_call(m, weights, inputs)
-        new_kv_cache = m.attn.kv_cache
-        return res, new_kv_cache
+    @functools.partial(jax_jit, kwargs_for_jax_jit={"static_argnums": (4, 5)})
+    # @jax_jit
+    def func(weights, inputs, kv_cache, pallas_meta_data_tuple, vllm_config,
+             num_tokens):
+        attn_metadata = PallasMetadata(
+            slot_mapping=pallas_meta_data_tuple[0],
+            block_tables=pallas_meta_data_tuple[1],
+            context_lens=pallas_meta_data_tuple[2],
+            query_start_loc=pallas_meta_data_tuple[3],
+            num_seqs=pallas_meta_data_tuple[4],
+        )
+        with set_forward_context(attn_metadata,
+                                 vllm_config,
+                                 num_tokens=num_tokens):
+            m.attn.kv_cache = kv_cache
+            res = torch.func.functional_call(m, weights, inputs)
+            new_kv_cache = m.attn.kv_cache
+            return res, new_kv_cache
 
     return func
 
@@ -109,6 +123,7 @@ num_blocks = 1024
         # "meta-llama/Llama-3.1-8B-Instruct",
         # "meta-llama/Llama-3.1-70B-Instruct",
     ])
+@torch.no_grad()
 def test_tpu_model_loader(model):
     torchax.enable_globally()
     vllm_config = _setup_environment(model)
@@ -136,21 +151,41 @@ def test_tpu_model_loader(model):
             num_blocks, block_size, num_kv_heads, head_size)
         # simulate bind
         m = m.to("jax")
+        print(f"check kv_cache_shape {kv_cache_shape}")
         m.attn.kv_cache = [torch.rand(kv_cache_shape).to('jax')]
         q = torch.rand(num_tokens, num_heads * head_size).to('jax')
         k = torch.rand(num_tokens, num_kv_heads * head_size).to('jax')
         v = torch.rand(num_tokens, num_kv_heads * head_size).to('jax')
         fwd_func = jax_jit(m.forward)
+        params, buffers = extract_all_buffers(m)
+        params = pytree.tree_map(lambda x: x.to('jax'), params)
+        buffers = pytree.tree_map(lambda x: x.to('jax'), buffers)
+        params_and_buffers = params
+        params_and_buffers.update(buffers)
+        print("params", params)
+        print("buffers", buffers)
+        wrapped_func = wrapped_module(m)
+        env = torchax.default_env()
 
         with set_forward_context(attn_metadata,
                                  vllm_config,
                                  num_tokens=num_tokens):
+            # JAX lowering
             # args = (q, k, v)
-            # env = torchax.default_env()
+
             # jax_args = env.t2j_iso(args)
             # lowered_ir = jax.jit(jax_view(m.forward)).lower(*jax_args).compiler_ir()
             # print(lowered_ir)
+
+            # Model fwd
             out = fwd_func(q, k, v)
             print(out)
-            out = fwd_func(q, k, v)
-            print(out)
+
+        # Wrap the model
+        pallas_meta_data_tuple = (slot_mapping, block_tables, context_lens,
+                                  query_start_loc, num_seqs)
+        pallas_meta_data_tuple = pytree.tree_map_only(torch.Tensor,
+                                                      lambda x: x.to('jax'),
+                                                      pallas_meta_data_tuple)
+        out = wrapped_func(params_and_buffers, (q, k, v), m.attn.kv_cache,
+                           pallas_meta_data_tuple, vllm_config, num_tokens)

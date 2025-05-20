@@ -237,7 +237,7 @@ class Attention(nn.Module):
             else:
                 torch.ops.vllm.unified_attention_with_output(
                     query, key, value, output, self.layer_name)
-            return output.view(-1, hidden_size)
+            return output.reshape(-1, hidden_size)
         else:
             if self.use_direct_call:
                 forward_context = get_forward_context()
