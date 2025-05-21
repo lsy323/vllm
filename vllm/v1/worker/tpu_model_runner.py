@@ -20,6 +20,7 @@ if envs.VLLM_TORCHAX_ENABLED:
 
 import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
+from torch.utils import _pytree as pytree
 
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
@@ -804,6 +805,36 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 f"check self.position_ids shape {self.position_ids.shape}")
             logger.info(
                 f"check self.position_ids dtype {self.position_ids.dtype}")
+            save_dict = {}
+            attn_metadata_torch_cpu = attn_metadata
+
+            attn_metadata_torch_cpu = pytree.tree_map_only(
+                torch.Tensor, lambda x: x.torch().cpu(),
+                attn_metadata_torch_cpu)
+            save_dict["attn_metadata"] = attn_metadata_torch_cpu
+            save_dict["attn_metadata"] = dict()
+            for key, value in attn_metadata_torch_cpu.items():
+                assert isinstance(value, PallasMetadata)
+                save_dict["attn_metadata"][key] = dict()
+                save_dict["attn_metadata"][key]["slot_mapping"] \
+                    = value.slot_mapping.torch().cpu()
+                save_dict["attn_metadata"][key]["block_tables"] \
+                    = value.block_tables.torch().cpu()
+                save_dict["attn_metadata"][key]["context_lens"] \
+                    = value.context_lens.torch().cpu()
+                save_dict["attn_metadata"][key]["query_start_loc"] \
+                    = value.query_start_loc.torch().cpu()
+                save_dict["attn_metadata"][key]["num_seqs"] \
+                    = value.num_seqs.torch().cpu()
+
+            # save_dict["attn_metadata"]["slot_mapping"] = attn_metadata.slot_mapping.torch().cpu()
+            # save_dict["attn_metadata"]["block_tables"] = attn_metadata.block_tables.torch().cpu()
+            # save_dict["attn_metadata"]["context_lens"] = attn_metadata.context_lens.torch().cpu()
+            # save_dict["attn_metadata"]["query_start_loc"] = attn_metadata.query_start_loc.torch().cpu()
+            # save_dict["attn_metadata"]["num_seqs"] = attn_metadata.num_seqs.torch().cpu()
+            save_dict["input_ids"] = input_ids.torch().cpu()
+            save_dict["position_ids"] = self.position_ids.torch().cpu()
+            # torch.save(save_dict, "/tmp/attn_metadata.pt")
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self.position_ids,
@@ -1319,13 +1350,18 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                         dtype = kv_cache_spec.dtype
 
                         tpu_kv_cache = torch.zeros(kv_cache_shape,
-                                                   dtype=dtype,
-                                                   device=self.device)
+                                                   dtype=dtype).to(self.device)
 
                         kv_caches[layer_name] = tpu_kv_cache
                     else:
                         raise NotImplementedError
 
+            # kv_caches_cpu = {}
+            # for k, v in kv_caches.items():
+            #     kv_caches_cpu[k] = torch.zeros(v.shape, dtype=v.dtype)
+            #     print(kv_caches_cpu[k])
+            # torch.save(kv_caches_cpu,
+            #            '/home/lsiyuan/torchax_dump/kv_caches.pt')
             bind_kv_cache(
                 kv_caches,
                 self.vllm_config.compilation_config.static_forward_context,
