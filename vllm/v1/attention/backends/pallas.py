@@ -97,6 +97,16 @@ class PallasMetadata:
     query_start_loc: torch.Tensor
     num_seqs: torch.Tensor
 
+    def tree_flatten(self):
+        children = (self.slot_mapping, self.block_tables, self.context_lens,
+                    self.query_start_loc, self.num_seqs)
+        aux_data = None
+        return (children, aux_data)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        return cls(*children)
+
 
 class PallasAttentionBackendImpl(AttentionImpl):
 
