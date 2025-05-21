@@ -80,7 +80,11 @@ class PallasAttentionBackend(AttentionBackend):
         return page_size
 
 
+from jax.tree_util import register_pytree_node_class
+
+
 @dataclass
+@register_pytree_node_class
 class PallasMetadata:
     # NOTE(sang): Definition of context_len, query_len, and seq_len.
     # |---------- N-1 iteration --------|

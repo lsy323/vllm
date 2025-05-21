@@ -69,26 +69,21 @@ class M(torch.nn.Module):
         return self.attn(q, k, v)
 
 
-def wrapped_module(m):
+def wrapped_module(m, vllm_config, forward_context):
 
-    @functools.partial(jax_jit, kwargs_for_jax_jit={"static_argnums": (4, 5)})
-    # @jax_jit
-    def func(weights, inputs, kv_cache, pallas_meta_data_tuple, vllm_config,
-             num_tokens):
-        attn_metadata = PallasMetadata(
-            slot_mapping=pallas_meta_data_tuple[0],
-            block_tables=pallas_meta_data_tuple[1],
-            context_lens=pallas_meta_data_tuple[2],
-            query_start_loc=pallas_meta_data_tuple[3],
-            num_seqs=pallas_meta_data_tuple[4],
-        )
+    @functools.partial(jax_jit, kwargs_for_jax_jit={"static_argnums": (4, )})
+    def func(weights, inputs, kv_caches, attn_metadata, num_tokens):
         with set_forward_context(attn_metadata,
                                  vllm_config,
                                  num_tokens=num_tokens):
-            m.attn.kv_cache = kv_cache
+            for layer_name, cache in kv_caches.items():
+                forward_context[layer_name].kv_cache = [cache]
             res = torch.func.functional_call(m, weights, inputs)
-            new_kv_cache = m.attn.kv_cache
-            return res, new_kv_cache
+            new_kv_caches = dict()
+            for layer_name, cache in kv_caches.items():
+                new_kv_caches[layer_name] = forward_context[
+                    layer_name].kv_cache
+            return res, new_kv_caches
 
     return func
 
@@ -105,13 +100,6 @@ query_start_loc = torch.cumsum(torch.tensor([0] + query_lens,
                                dim=0,
                                dtype=torch.int32)
 num_seqs = torch.tensor([max_num_reqs], dtype=torch.int32)
-attn_metadata = PallasMetadata(
-    slot_mapping=slot_mapping,
-    block_tables=block_tables,
-    context_lens=context_lens,
-    query_start_loc=query_start_loc,
-    num_seqs=num_seqs,
-)
 
 num_blocks = 1024
 
@@ -152,7 +140,8 @@ def test_tpu_model_loader(model):
         # simulate bind
         m = m.to("jax")
         print(f"check kv_cache_shape {kv_cache_shape}")
-        m.attn.kv_cache = [torch.rand(kv_cache_shape).to('jax')]
+        kv_cache = torch.rand(kv_cache_shape).to('jax')
+        # m.attn.kv_cache = [torch.rand(kv_cache_shape).to('jax')]
         q = torch.rand(num_tokens, num_heads * head_size).to('jax')
         k = torch.rand(num_tokens, num_kv_heads * head_size).to('jax')
         v = torch.rand(num_tokens, num_kv_heads * head_size).to('jax')
@@ -164,28 +153,29 @@ def test_tpu_model_loader(model):
         params_and_buffers.update(buffers)
         print("params", params)
         print("buffers", buffers)
-        wrapped_func = wrapped_module(m)
-        env = torchax.default_env()
 
-        with set_forward_context(attn_metadata,
-                                 vllm_config,
-                                 num_tokens=num_tokens):
-            # JAX lowering
-            # args = (q, k, v)
+        # Wrap func
+        forward_context = {'attn': m.attn}
+        wrapped_func = wrapped_module(m, vllm_config, forward_context)
 
-            # jax_args = env.t2j_iso(args)
-            # lowered_ir = jax.jit(jax_view(m.forward)).lower(*jax_args).compiler_ir()
-            # print(lowered_ir)
+        # with set_forward_context(attn_metadata,
+        #                          vllm_config,
+        #                          num_tokens=num_tokens):
+        # JAX lowering
+        # args = (q, k, v)
 
-            # Model fwd
-            out = fwd_func(q, k, v)
-            print(out)
+        # jax_args = env.t2j_iso(args)
+        # lowered_ir = jax.jit(jax_view(m.forward)).lower(*jax_args).compiler_ir()
+        # print(lowered_ir)
+
+        # Model fwd
+        # out = fwd_func(q, k, v)
+        # print(out)
 
         # Wrap the model
-        pallas_meta_data_tuple = (slot_mapping, block_tables, context_lens,
-                                  query_start_loc, num_seqs)
-        pallas_meta_data_tuple = pytree.tree_map_only(torch.Tensor,
-                                                      lambda x: x.to('jax'),
-                                                      pallas_meta_data_tuple)
-        out = wrapped_func(params_and_buffers, (q, k, v), m.attn.kv_cache,
-                           pallas_meta_data_tuple, vllm_config, num_tokens)
+
+        kv_caches = {'attn': kv_cache}
+        # kv_caches = [kv_cache]
+        out = wrapped_func(params_and_buffers, (q, k, v), kv_caches,
+                           attn_metadata, num_tokens)
+        print(out)

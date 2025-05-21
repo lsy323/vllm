@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-import jax
 import torch
 import torchax
 from torchax.interop import jax_jit
 
 from vllm.v1.attention.backends.pallas import PallasMetadata
-
-jax.tree_util.register_pytree_node_class(PallasMetadata)
 
 torchax.enable_globally()
 
