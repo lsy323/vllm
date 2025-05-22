@@ -14,7 +14,7 @@ answers = [
 ]
 N = 1
 # Currently, top-p sampling is disabled. `top_p` should be 1.0.
-sampling_params = SamplingParams(temperature=0, top_p=1.0, n=N, max_tokens=1)
+sampling_params = SamplingParams(temperature=0, top_p=1.0, n=N, max_tokens=16)
 
 
 def main():

@@ -11,6 +11,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
+from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.utils import cdiv, next_power_of_2
 
@@ -197,6 +198,8 @@ class PallasAttentionBackendImpl(AttentionImpl):
         if kv_cache.numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
             kv_cache = write_to_kv_cache(key, value, kv_cache, slot_mapping)
+            forward_context: ForwardContext = get_forward_context()
+            layer.kv_cache[forward_context.virtual_engine] = kv_cache
 
         output = torch.ops.xla.ragged_paged_attention(
             query,

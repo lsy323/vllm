@@ -178,6 +178,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
         self.kv_caches: list[torch.Tensor] = []
+        self.kv_caches_dict: dict[str, torch.Tensor] = []
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
         # self.input_batch: InputBatch  # Persistent batch.
@@ -790,59 +791,99 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         xm.mark_step()
         num_reqs = self.input_batch.num_reqs
         # Run the decoder
-        with set_forward_context(
-                attn_metadata,
+        if True:
+            from torchax.interop import extract_all_buffers
+
+            from vllm.compilation.torchax_wrapper import wrapped_module
+            static_forward_context = self.vllm_config.compilation_config.static_forward_context
+            wrapped_model_forward = wrapped_module(
+                self.model,
                 self.vllm_config,
-                num_tokens=scheduler_output.total_num_scheduled_tokens):
-            logger.info(f"check attn_metadata {attn_metadata}")
-            logger.info(
-                f"num_tokens {scheduler_output.total_num_scheduled_tokens}")
-            logger.info(f"check input_ids {input_ids}")
-            logger.info(f"check input_ids shape {input_ids.shape}")
-            logger.info(f"check input_ids dtype {input_ids.dtype}")
-            logger.info(f"check inputs_embeds {inputs_embeds}")
-            logger.info(
-                f"check self.position_ids shape {self.position_ids.shape}")
-            logger.info(
-                f"check self.position_ids dtype {self.position_ids.dtype}")
-            save_dict = {}
-            attn_metadata_torch_cpu = attn_metadata
-
-            attn_metadata_torch_cpu = pytree.tree_map_only(
-                torch.Tensor, lambda x: x.torch().cpu(),
-                attn_metadata_torch_cpu)
-            save_dict["attn_metadata"] = attn_metadata_torch_cpu
-            save_dict["attn_metadata"] = dict()
-            for key, value in attn_metadata_torch_cpu.items():
-                assert isinstance(value, PallasMetadata)
-                save_dict["attn_metadata"][key] = dict()
-                save_dict["attn_metadata"][key]["slot_mapping"] \
-                    = value.slot_mapping.torch().cpu()
-                save_dict["attn_metadata"][key]["block_tables"] \
-                    = value.block_tables.torch().cpu()
-                save_dict["attn_metadata"][key]["context_lens"] \
-                    = value.context_lens.torch().cpu()
-                save_dict["attn_metadata"][key]["query_start_loc"] \
-                    = value.query_start_loc.torch().cpu()
-                save_dict["attn_metadata"][key]["num_seqs"] \
-                    = value.num_seqs.torch().cpu()
-
-            # save_dict["attn_metadata"]["slot_mapping"] = attn_metadata.slot_mapping.torch().cpu()
-            # save_dict["attn_metadata"]["block_tables"] = attn_metadata.block_tables.torch().cpu()
-            # save_dict["attn_metadata"]["context_lens"] = attn_metadata.context_lens.torch().cpu()
-            # save_dict["attn_metadata"]["query_start_loc"] = attn_metadata.query_start_loc.torch().cpu()
-            # save_dict["attn_metadata"]["num_seqs"] = attn_metadata.num_seqs.torch().cpu()
-            save_dict["input_ids"] = input_ids.torch().cpu()
-            save_dict["position_ids"] = self.position_ids.torch().cpu()
-            # torch.save(save_dict, "/tmp/attn_metadata.pt")
-            hidden_states = self.model(
-                input_ids=input_ids,
-                positions=self.position_ids,
-                inputs_embeds=inputs_embeds,
+                static_forward_context,
             )
+            params, buffers = extract_all_buffers(self.model)
+            params_and_buffers = {**params, **buffers}
+            params_and_buffers = pytree.tree_map_only(torch.Tensor,
+                                                      lambda x: x.to('jax'),
+                                                      params_and_buffers)
+            input_args = (input_ids, self.position_ids)
+            hidden_states, new_kv_caches = wrapped_model_forward(
+                params_and_buffers, input_args, self.kv_caches_dict,
+                attn_metadata, scheduler_output.total_num_scheduled_tokens)
+
+            # logger.info(f"check new_kv_caches {new_kv_caches}")
+            for layer_name, kv_cache in new_kv_caches.items():
+                # NOTE: Use list because of v0 PP virtual engine.
+                static_forward_context[layer_name].kv_cache = [kv_cache]
+                self.kv_caches_dict[layer_name] = kv_cache[0]
+
+        if False:
+            with set_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    num_tokens=scheduler_output.total_num_scheduled_tokens):
+                logger.info(f"check attn_metadata {attn_metadata}")
+                logger.info(
+                    f"num_tokens {scheduler_output.total_num_scheduled_tokens}"
+                )
+                logger.info(f"check input_ids {input_ids}")
+                logger.info(f"check input_ids shape {input_ids.shape}")
+                logger.info(f"check input_ids dtype {input_ids.dtype}")
+                logger.info(f"check inputs_embeds {inputs_embeds}")
+                logger.info(
+                    f"check self.position_ids shape {self.position_ids.shape}")
+                logger.info(
+                    f"check self.position_ids dtype {self.position_ids.dtype}")
+                save_dict = {}
+                attn_metadata_torch_cpu = attn_metadata
+
+                attn_metadata_torch_cpu = pytree.tree_map_only(
+                    torch.Tensor, lambda x: x.torch().cpu(),
+                    attn_metadata_torch_cpu)
+                save_dict["attn_metadata"] = attn_metadata_torch_cpu
+                save_dict["attn_metadata"] = dict()
+                for key, value in attn_metadata_torch_cpu.items():
+                    assert isinstance(value, PallasMetadata)
+                    save_dict["attn_metadata"][key] = dict()
+                    save_dict["attn_metadata"][key]["slot_mapping"] \
+                        = value.slot_mapping.torch().cpu()
+                    save_dict["attn_metadata"][key]["block_tables"] \
+                        = value.block_tables.torch().cpu()
+                    save_dict["attn_metadata"][key]["context_lens"] \
+                        = value.context_lens.torch().cpu()
+                    save_dict["attn_metadata"][key]["query_start_loc"] \
+                        = value.query_start_loc.torch().cpu()
+                    save_dict["attn_metadata"][key]["num_seqs"] \
+                        = value.num_seqs.torch().cpu()
+
+                # save_dict["attn_metadata"]["slot_mapping"] = attn_metadata.slot_mapping.torch().cpu()
+                # save_dict["attn_metadata"]["block_tables"] = attn_metadata.block_tables.torch().cpu()
+                # save_dict["attn_metadata"]["context_lens"] = attn_metadata.context_lens.torch().cpu()
+                # save_dict["attn_metadata"]["query_start_loc"] = attn_metadata.query_start_loc.torch().cpu()
+                # save_dict["attn_metadata"]["num_seqs"] = attn_metadata.num_seqs.torch().cpu()
+                save_dict["input_ids"] = input_ids.torch().cpu()
+                save_dict["position_ids"] = self.position_ids.torch().cpu()
+                # torch.save(save_dict, "/tmp/attn_metadata.pt")
+                hidden_states = self.model(
+                    input_ids=input_ids,
+                    positions=self.position_ids,
+                    inputs_embeds=inputs_embeds,
+                )
         hidden_states = self.select_hidden_states(hidden_states,
                                                   logits_indices)
-        logits = self.compute_logits(hidden_states)
+        logger.info(f"check hidden_states {hidden_states}")
+        logger.info(f"check hidden_states shape {hidden_states.shape}")
+        from vllm.compilation.torchax_wrapper import functional_call
+        logits = functional_call(
+            self.model,
+            "compute_logits",
+            params,
+            buffers,
+            hidden_states,
+            None,
+        )
+        # logits = self.compute_logits(hidden_states)
+        logger.info(f"check logits shape {logits.shape}")
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
             from_input_batch(self.input_batch, padded_num_reqs, self.device)
         if scheduler_output.grammar_bitmask is not None:
@@ -1365,7 +1406,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             bind_kv_cache(
                 kv_caches,
                 self.vllm_config.compilation_config.static_forward_context,
-                self.kv_caches)
+                self.kv_caches,
+            )
+            self.kv_caches_dict = kv_caches
 
     def reset_dynamo_cache(self):
         if self.is_multimodal_model:
@@ -1378,16 +1421,16 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 compiled_model.original_code_object)
             compiled_model.compiled_codes.clear()
 
-    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def select_hidden_states(self, hidden_states, indices_do_sample):
         return hidden_states[indices_do_sample]
 
-    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def compute_logits(self,
                        sample_hidden_states: torch.Tensor) -> torch.Tensor:
         return self.model.compute_logits(sample_hidden_states, None)
 
-    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def sample_from_logits(
             self, logits: torch.Tensor,
             sampling_metadata: TPUSupportedSamplingMetadata) -> torch.Tensor:

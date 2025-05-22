@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+import copy
 import functools
 import tempfile
 
 import pytest
 import torch
 import torchax
+from torch.nn.utils import stateless as torch_stateless
 from torch.utils import _pytree as pytree
 from torchax.interop import extract_all_buffers, jax_jit
 
@@ -36,7 +38,13 @@ def _setup_environment(model):
 
 def wrapped_module(m, vllm_config, static_forward_context):
 
-    @functools.partial(jax_jit, kwargs_for_jax_jit={"static_argnums": (4, )})
+    @functools.partial(
+        jax_jit,
+        kwargs_for_jax_jit={
+            "static_argnums": (4, ),
+            "donate_argnums": (2, )
+        },
+    )
     def func(weights, inputs, kv_caches, attn_metadata, num_tokens):
         with set_forward_context(attn_metadata,
                                  vllm_config,
@@ -91,6 +99,19 @@ def _load_dump(path):
         return pallas_metadata, input_ids, position_ids
 
 
+def functional_call(model, method_name, params, buffers, *args, **kwargs):
+    kwargs = kwargs or {}
+    params_copy = copy.copy(params)
+    params_copy.update(buffers)
+    # # reinflate the state dict so there are not any missing keys
+    # for k, v in self._extra_dumped_weights.items():
+    #     for new_key in v:
+    #         params_copy[new_key] = params_copy[k]
+    with torch_stateless._reparametrize_module(model, params_copy):
+        res = getattr(model, method_name)(*args, **kwargs)
+    return res
+
+
 @pytest.mark.parametrize(
     "model",
     [
@@ -126,14 +147,30 @@ def test_tpu_model_loader(model):
     # breakpoint()
     wrapped_func = wrapped_module(model, vllm_config, static_forward_context)
     params, buffers = extract_all_buffers(model)
+    params, buffers = pytree.tree_map_only(torch.Tensor, lambda x: x.to('jax'),
+                                           (params, buffers))
     params_and_buffers = {**params, **buffers}
-    params_and_buffers = pytree.tree_map_only(torch.Tensor,
-                                              lambda x: x.to('jax'),
-                                              params_and_buffers)
+    # params_and_buffers = pytree.tree_map_only(torch.Tensor,
+    #                                           lambda x: x.to('jax'),
+    #                                           params_and_buffers)
     input_args = (input_ids, position_ids)
     num_tokens = 9  # Not used?
-    out = wrapped_func(params_and_buffers, input_args, kv_caches,
-                       attn_metadata, num_tokens)
-
-    print(out)
+    hidden_states, new_kv_caches = wrapped_func(params_and_buffers, input_args,
+                                                kv_caches, attn_metadata,
+                                                num_tokens)
+    print(hidden_states)
     # breakpoint()
+    # print(new_kv_caches)
+
+    # params_and_buffers = None
+    # params = None
+    # buffers = None
+    @jax_jit
+    def wrapped_compute_logits(params, buffers, hidden_states, sampling_param):
+        return functional_call(model, "compute_logits", params, buffers,
+                               hidden_states, sampling_param)
+
+    # logits = functional_call(model, "compute_logits", params, buffers, hidden_states, None)
+    logits = wrapped_compute_logits(params, buffers, hidden_states, None)
+    # logits = model.compute_logits(hidden_states, None)
+    print(logits)
