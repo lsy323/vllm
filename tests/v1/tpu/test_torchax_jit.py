@@ -10,6 +10,7 @@ from torch.nn.utils import stateless as torch_stateless
 from torch.utils import _pytree as pytree
 from torchax.interop import extract_all_buffers, jax_jit
 
+from vllm.attention.layer import Attention
 from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
@@ -49,8 +50,8 @@ def wrapped_module(m, vllm_config, static_forward_context):
         with set_forward_context(attn_metadata,
                                  vllm_config,
                                  num_tokens=num_tokens):
-            # m.attn.kv_cache = kv_cache
-            for layer_name, cache in static_forward_context.items():
+            # Bind kv cache
+            for layer_name, attn in static_forward_context.items():
                 static_forward_context[layer_name].kv_cache = [
                     kv_caches[layer_name]
                 ]
@@ -64,7 +65,7 @@ def wrapped_module(m, vllm_config, static_forward_context):
                                              tie_weights=False)
             # new_kv_cache = m.attn.kv_cache
             new_kv_cache = dict()
-            for layer_name, cache in static_forward_context.items():
+            for layer_name, attn in static_forward_context.items():
                 new_kv_cache[layer_name] = static_forward_context[
                     layer_name].kv_cache
             return res, new_kv_cache
@@ -125,18 +126,30 @@ def test_tpu_model_loader(model):
     model = loader.load_model(None, vllm_config)
 
     torchax.enable_globally()
-    # env = torchax.default_env()
-    # with env:
     model = model.to('jax')
     print(model)
-    # for name, param in model.named_parameters():
-    #     print(f"name {name}: param {param}")
+
     attn_metadata, input_ids, position_ids = \
         _load_dump('/home/lsiyuan/torchax_dump/attn_metadata.pt')
 
-    kv_caches = torch.load('/home/lsiyuan/torchax_dump/kv_caches.pt')
-    for key, value in kv_caches.items():
-        kv_caches[key] = value[:1024]
+    assert isinstance(model.model.layers[0].self_attn.attn, Attention)
+
+    n_blocks = 1024
+    block_size = 16
+    num_kv_heads = model.model.layers[0].self_attn.attn.num_kv_heads
+    head_size = model.model.layers[0].self_attn.attn.head_size
+    kv_dtype = torch.bfloat16
+
+    kv_caches = dict()
+    kv_cache_shape = (n_blocks, block_size, num_kv_heads * 2, head_size)
+    for i in range(len(model.model.layers)):
+        key = f"model.layers.{i}.self_attn.attn"
+        kv_caches[key] = torch.zeros(kv_cache_shape, dtype=kv_dtype)
+
+    # kv_caches = torch.load('/home/lsiyuan/torchax_dump/kv_caches.pt')
+    # for key, value in kv_caches.items():
+    #     kv_caches[key] = value[:1024]
+    #     print(f"key {key}: value {kv_caches[key].shape}")
     kv_caches = pytree.tree_map_only(torch.Tensor, lambda x: x.to('jax'),
                                      kv_caches)
 
@@ -144,33 +157,26 @@ def test_tpu_model_loader(model):
     static_forward_context = \
         vllm_config.compilation_config.static_forward_context
 
-    # breakpoint()
     wrapped_func = wrapped_module(model, vllm_config, static_forward_context)
     params, buffers = extract_all_buffers(model)
     params, buffers = pytree.tree_map_only(torch.Tensor, lambda x: x.to('jax'),
                                            (params, buffers))
     params_and_buffers = {**params, **buffers}
-    # params_and_buffers = pytree.tree_map_only(torch.Tensor,
-    #                                           lambda x: x.to('jax'),
-    #                                           params_and_buffers)
     input_args = (input_ids, position_ids)
     num_tokens = 9  # Not used?
     hidden_states, new_kv_caches = wrapped_func(params_and_buffers, input_args,
                                                 kv_caches, attn_metadata,
                                                 num_tokens)
     print(hidden_states)
-    # breakpoint()
-    # print(new_kv_caches)
+    for new_kv_cache in new_kv_caches.values():
+        # Ensure kv cache is updated.
+        assert torch.count_nonzero(new_kv_cache[0]) > 0
 
-    # params_and_buffers = None
-    # params = None
-    # buffers = None
     @jax_jit
     def wrapped_compute_logits(params, buffers, hidden_states, sampling_param):
         return functional_call(model, "compute_logits", params, buffers,
                                hidden_states, sampling_param)
 
-    # logits = functional_call(model, "compute_logits", params, buffers, hidden_states, None)
     logits = wrapped_compute_logits(params, buffers, hidden_states, None)
     # logits = model.compute_logits(hidden_states, None)
     print(logits)

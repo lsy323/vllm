@@ -54,3 +54,9 @@ def functional_call(model, method_name, params, buffers, *args, **kwargs):
     with torch_stateless._reparametrize_module(model, params_copy):
         res = getattr(model, method_name)(*args, **kwargs)
     return res
+
+
+@jax_jit
+def wrapped_compute_logits(params, buffers, hidden_states, sampling_param):
+    return functional_call(model, "compute_logits", params, buffers,
+                           hidden_states, sampling_param)

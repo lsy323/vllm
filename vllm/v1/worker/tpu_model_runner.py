@@ -178,7 +178,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
         self.kv_caches: list[torch.Tensor] = []
-        self.kv_caches_dict: dict[str, torch.Tensor] = []
+        self.kv_caches_dict: dict[str, torch.Tensor] = dict()
+        self.model_func = None
+        self.compute_logits_func = None
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
         # self.input_batch: InputBatch  # Persistent batch.
@@ -792,22 +794,30 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         num_reqs = self.input_batch.num_reqs
         # Run the decoder
         if True:
-            from torchax.interop import extract_all_buffers
-
-            from vllm.compilation.torchax_wrapper import wrapped_module
             static_forward_context = self.vllm_config.compilation_config.static_forward_context
-            wrapped_model_forward = wrapped_module(
-                self.model,
-                self.vllm_config,
-                static_forward_context,
-            )
-            params, buffers = extract_all_buffers(self.model)
-            params_and_buffers = {**params, **buffers}
-            params_and_buffers = pytree.tree_map_only(torch.Tensor,
-                                                      lambda x: x.to('jax'),
-                                                      params_and_buffers)
+            if self.model_func is None:
+                from torchax.interop import extract_all_buffers
+
+                from vllm.compilation.torchax_wrapper import wrapped_module
+                wrapped_model_forward = wrapped_module(
+                    self.model,
+                    self.vllm_config,
+                    static_forward_context,
+                )
+                self.model_func = wrapped_model_forward
+                params, buffers = extract_all_buffers(self.model)
+                params, buffers = pytree.tree_map_only(torch.Tensor,
+                                                       lambda x: x.to('jax'),
+                                                       (params, buffers))
+                self.params = params
+                self.buffers = buffers
+            params_and_buffers = {**self.params, **self.buffers}
+            # params_and_buffers = pytree.tree_map_only(torch.Tensor,
+            #                                           lambda x: x.to('jax'),
+            #                                           params_and_buffers)
             input_args = (input_ids, self.position_ids)
-            hidden_states, new_kv_caches = wrapped_model_forward(
+            assert self.model_func is not None
+            hidden_states, new_kv_caches = self.model_func(
                 params_and_buffers, input_args, self.kv_caches_dict,
                 attn_metadata, scheduler_output.total_num_scheduled_tokens)
 
@@ -873,15 +883,23 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                                   logits_indices)
         logger.info(f"check hidden_states {hidden_states}")
         logger.info(f"check hidden_states shape {hidden_states.shape}")
-        from vllm.compilation.torchax_wrapper import functional_call
-        logits = functional_call(
-            self.model,
-            "compute_logits",
-            params,
-            buffers,
-            hidden_states,
-            None,
-        )
+
+        if self.compute_logits_func is None:
+            from torchax.interop import jax_jit
+
+            from vllm.compilation.torchax_wrapper import functional_call
+
+            @jax_jit
+            def wrapped_compute_logits(params, buffers, hidden_states,
+                                       sampling_param):
+                return functional_call(self.model, "compute_logits", params,
+                                       buffers, hidden_states, sampling_param)
+
+            self.compute_logits_func = wrapped_compute_logits
+
+        assert self.compute_logits_func is not None
+        logits = self.compute_logits_func(self.params, self.buffers,
+                                          hidden_states, None)
         # logits = self.compute_logits(hidden_states)
         logger.info(f"check logits shape {logits.shape}")
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
