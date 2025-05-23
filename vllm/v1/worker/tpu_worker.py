@@ -26,10 +26,9 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (AttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.utils import bind_kv_cache, report_usage_stats
+from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.tpu_model_runner import TPUModelRunner
 
 logger = init_logger(__name__)
@@ -159,30 +158,7 @@ class TPUWorker:
             report_usage_stats(self.vllm_config)
 
     def determine_available_memory(self) -> int:
-        env = torchax.default_env()
-        kv_caches: dict[str, torch.Tensor] = {}
-        kv_cache_spec = self.model_runner.get_kv_cache_spec()
-        for layer_name, layer_spec in kv_cache_spec.items():
-            if isinstance(layer_spec, AttentionSpec):
-                dtype = layer_spec.dtype
-
-                with env:
-                    # Use an empty tensor instead of `None`` to force Dynamo to pass
-                    # it by reference, rather by specializing on the value ``None``.
-                    tpu_kv_cache = torch.tensor([],
-                                                dtype=dtype,
-                                                device=self.device)
-                kv_caches[layer_name] = tpu_kv_cache
-            else:
-                raise NotImplementedError(
-                    f"Unsupported KV cache spec '{type(layer_spec)}'")
-
-        runner_kv_caches: list[torch.Tensor] = []
-        bind_kv_cache(
-            kv_caches,
-            self.vllm_config.compilation_config.static_forward_context,
-            runner_kv_caches)
-
+        torchax.enable_globally()
         # `max_num_tokens >= max_num_batched_tokens` due to padding.
         self.model_runner.profile_run(self.model_runner.max_num_tokens)
 
@@ -221,6 +197,7 @@ class TPUWorker:
                                  self.cache_config.gpu_memory_utilization)
         tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
 
+        torchax.disable_globally()
         return int(tpu_kv_cache_bytes) // 1024
 
     def execute_model(

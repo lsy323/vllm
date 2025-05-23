@@ -793,41 +793,18 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         xm.mark_step()
         num_reqs = self.input_batch.num_reqs
         # Run the decoder
-        if True:
+        if not envs.VLLM_TORCHAX_EAGER:
             static_forward_context = self.vllm_config.compilation_config.static_forward_context
-            if self.model_func is None:
-                from torchax.interop import extract_all_buffers
-
-                from vllm.compilation.torchax_wrapper import wrapped_module
-                wrapped_model_forward = wrapped_module(
-                    self.model,
-                    self.vllm_config,
-                    static_forward_context,
-                )
-                self.model_func = wrapped_model_forward
-                params, buffers = extract_all_buffers(self.model)
-                params, buffers = pytree.tree_map_only(torch.Tensor,
-                                                       lambda x: x.to('jax'),
-                                                       (params, buffers))
-                self.params = params
-                self.buffers = buffers
-            params_and_buffers = {**self.params, **self.buffers}
-            # params_and_buffers = pytree.tree_map_only(torch.Tensor,
-            #                                           lambda x: x.to('jax'),
-            #                                           params_and_buffers)
             input_args = (input_ids, self.position_ids)
-            assert self.model_func is not None
             hidden_states, new_kv_caches = self.model_func(
-                params_and_buffers, input_args, self.kv_caches_dict,
+                self.params_and_buffers, input_args, self.kv_caches_dict,
                 attn_metadata, scheduler_output.total_num_scheduled_tokens)
-
-            # logger.info(f"check new_kv_caches {new_kv_caches}")
+            # Set the new KV caches to the static forward context.
             for layer_name, kv_cache in new_kv_caches.items():
-                # NOTE: Use list because of v0 PP virtual engine.
+                # NOTE: Use list because of virtual engine.
                 static_forward_context[layer_name].kv_cache = [kv_cache]
                 self.kv_caches_dict[layer_name] = kv_cache[0]
-
-        if False:
+        else:
             with set_forward_context(
                     attn_metadata,
                     self.vllm_config,
@@ -865,12 +842,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                         = value.query_start_loc.torch().cpu()
                     save_dict["attn_metadata"][key]["num_seqs"] \
                         = value.num_seqs.torch().cpu()
-
-                # save_dict["attn_metadata"]["slot_mapping"] = attn_metadata.slot_mapping.torch().cpu()
-                # save_dict["attn_metadata"]["block_tables"] = attn_metadata.block_tables.torch().cpu()
-                # save_dict["attn_metadata"]["context_lens"] = attn_metadata.context_lens.torch().cpu()
-                # save_dict["attn_metadata"]["query_start_loc"] = attn_metadata.query_start_loc.torch().cpu()
-                # save_dict["attn_metadata"]["num_seqs"] = attn_metadata.num_seqs.torch().cpu()
                 save_dict["input_ids"] = input_ids.torch().cpu()
                 save_dict["position_ids"] = self.position_ids.torch().cpu()
                 # torch.save(save_dict, "/tmp/attn_metadata.pt")
@@ -881,27 +852,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 )
         hidden_states = self.select_hidden_states(hidden_states,
                                                   logits_indices)
-        logger.info(f"check hidden_states {hidden_states}")
-        logger.info(f"check hidden_states shape {hidden_states.shape}")
-
-        if self.compute_logits_func is None:
-            from torchax.interop import jax_jit
-
-            from vllm.compilation.torchax_wrapper import functional_call
-
-            @jax_jit
-            def wrapped_compute_logits(params, buffers, hidden_states,
-                                       sampling_param):
-                return functional_call(self.model, "compute_logits", params,
-                                       buffers, hidden_states, sampling_param)
-
-            self.compute_logits_func = wrapped_compute_logits
-
-        assert self.compute_logits_func is not None
-        logits = self.compute_logits_func(self.params, self.buffers,
-                                          hidden_states, None)
-        # logits = self.compute_logits(hidden_states)
-        logger.info(f"check logits shape {logits.shape}")
+        if not envs.VLLM_TORCHAX_EAGER:
+            logits = self.compute_logits_func(self.params_and_buffers,
+                                              hidden_states, None)
+        else:
+            logits = self.compute_logits(hidden_states)
         tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
             from_input_batch(self.input_batch, padded_num_reqs, self.device)
         if scheduler_output.grammar_bitmask is not None:
@@ -1023,6 +978,33 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             tpu_loader = TPUModelLoader(
                 load_config=self.vllm_config.load_config)
             model = tpu_loader.load_model(None, vllm_config=self.vllm_config)
+
+            # Extract all params and buffers for functional call.
+            torchax.enable_globally()
+            from torchax.interop import extract_all_buffers
+            params, buffers = extract_all_buffers(model)
+            # Need to explicitly move to jax device, because `model.to('jax')`
+            # won't move tensors on python attributes to jax device.
+            self.params_and_buffers = {**params, **buffers}
+            self.params_and_buffers = pytree.tree_map_only(
+                torch.Tensor, lambda x: x.to('jax'), self.params_and_buffers)
+
+            # Create a function for model.forward
+            from vllm.compilation.torchax_wrapper import wrap_model
+            static_forward_context = \
+                self.vllm_config.compilation_config.static_forward_context
+            wrapped_model_forward = wrap_model(
+                model,
+                self.vllm_config,
+                static_forward_context,
+            )
+            self.model_func = wrapped_model_forward
+
+            # Create a function for model.compute_logits
+            from vllm.compilation.torchax_wrapper import wrap_model_func
+            self.compute_logits_func = wrap_model_func(model, "compute_logits")
+
+            torchax.disable_globally()
         else:
             with patch(
                     "vllm.model_executor.layers.vocab_parallel_embedding."
@@ -1043,62 +1025,74 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.no_grad()
     def _dummy_run(self, num_tokens: int) -> None:
-        env = torchax.default_env()
-        with env:
-            if self.is_multimodal_model:
-                input_ids = None
-                inputs_embeds = torch.zeros((num_tokens, self.hidden_size),
-                                            dtype=self.dtype,
-                                            device=self.device)
-            else:
-                input_ids = torch.zeros((num_tokens),
-                                        dtype=torch.int32,
+        if self.is_multimodal_model:
+            input_ids = None
+            inputs_embeds = torch.zeros((num_tokens, self.hidden_size),
+                                        dtype=self.dtype,
                                         device=self.device)
-                inputs_embeds = None
-            actual_num_reqs = min(num_tokens, self.max_num_reqs)
-            position_ids = torch.zeros(num_tokens,
-                                       dtype=torch.int32,
-                                       device=self.device)
-            slot_mapping = torch.zeros(num_tokens,
-                                       dtype=torch.int64,
-                                       device=self.device)
-            block_tables = torch.zeros(
-                (self.max_num_reqs, self.block_table_cpu.shape[1]),
-                dtype=torch.int32,
-                device=self.device)
-            query_lens = [1] * self.max_num_reqs
-            query_start_loc = torch.cumsum(torch.tensor([0] + query_lens,
-                                                        dtype=torch.int32),
-                                           dim=0,
-                                           dtype=torch.int32).to(self.device)
-            context_lens = torch.ones((self.max_num_reqs, ),
-                                      dtype=torch.int32,
-                                      device=self.device)
-            num_seqs = torch.tensor([actual_num_reqs],
+        else:
+            input_ids = torch.zeros((num_tokens),
                                     dtype=torch.int32,
                                     device=self.device)
-            attn_metadata = PallasMetadata(
-                slot_mapping=slot_mapping,
-                block_tables=block_tables,
-                context_lens=context_lens,
-                query_start_loc=query_start_loc,
-                num_seqs=num_seqs,
-            )
+            inputs_embeds = None
+        actual_num_reqs = min(num_tokens, self.max_num_reqs)
+        position_ids = torch.zeros(num_tokens,
+                                   dtype=torch.int32,
+                                   device=self.device)
+        slot_mapping = torch.zeros(num_tokens,
+                                   dtype=torch.int64,
+                                   device=self.device)
+        block_tables = torch.zeros(
+            (self.max_num_reqs, self.block_table_cpu.shape[1]),
+            dtype=torch.int32,
+            device=self.device)
+        query_lens = [1] * self.max_num_reqs
+        query_start_loc = torch.cumsum(torch.tensor([0] + query_lens,
+                                                    dtype=torch.int32),
+                                       dim=0,
+                                       dtype=torch.int32).to(self.device)
+        context_lens = torch.ones((self.max_num_reqs, ),
+                                  dtype=torch.int32,
+                                  device=self.device)
+        num_seqs = torch.tensor([actual_num_reqs],
+                                dtype=torch.int32,
+                                device=self.device)
+        attn_metadata = PallasMetadata(
+            slot_mapping=slot_mapping,
+            block_tables=block_tables,
+            context_lens=context_lens,
+            query_start_loc=query_start_loc,
+            num_seqs=num_seqs,
+        )
 
-            if self.is_multimodal_model:
-                torch._dynamo.mark_dynamic(inputs_embeds, 0)
-            else:
-                torch._dynamo.mark_dynamic(input_ids, 0)
-            torch._dynamo.mark_dynamic(position_ids, 0)
-            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
+        if self.is_multimodal_model:
+            torch._dynamo.mark_dynamic(inputs_embeds, 0)
+        else:
+            torch._dynamo.mark_dynamic(input_ids, 0)
+        torch._dynamo.mark_dynamic(position_ids, 0)
+        torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
 
-            layer_names = get_layers_from_vllm_config(self.vllm_config,
-                                                      Attention).keys()
-            per_layer_attn_metadata = {
-                layer_name: attn_metadata
-                for layer_name in layer_names
-            }
+        layer_names = get_layers_from_vllm_config(self.vllm_config,
+                                                  Attention).keys()
+        per_layer_attn_metadata = {
+            layer_name: attn_metadata
+            for layer_name in layer_names
+        }
 
+        if envs.VLLM_TORCHAX_ENABLED:
+            input_args = (input_ids, position_ids)
+            out, new_kv_caches = self.model_func(self.params_and_buffers,
+                                                 input_args,
+                                                 self.kv_caches_dict,
+                                                 per_layer_attn_metadata, 0)
+            # Set the new KV caches to the static forward context.
+            static_forward_context = \
+                self.vllm_config.compilation_config.static_forward_context
+            for layer_name, kv_cache in new_kv_caches.items():
+                # NOTE: Use list because of virtual engine.
+                static_forward_context[layer_name].kv_cache = [kv_cache]
+                self.kv_caches_dict[layer_name] = kv_cache[0]
+        else:
             with self.maybe_dummy_run_with_lora(
                     self.lora_config,
                     np.array([num_tokens],
@@ -1107,7 +1101,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 out = self.model(input_ids=input_ids,
                                  positions=position_ids,
                                  inputs_embeds=inputs_embeds)
-            self._hidden_states_dtype = out.dtype
+        self._hidden_states_dtype = out.dtype
 
     def _precompile_mm_encoder(self) -> None:
         # Pre-compile MM encoder for all supported data modalities.
@@ -1219,8 +1213,12 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             dummy_hidden = torch.zeros((num_reqs, hsize),
                                        device=self.device,
                                        dtype=self._hidden_states_dtype)
-            torch._dynamo.mark_dynamic(dummy_hidden, 0)
-            self.compute_logits(dummy_hidden)
+            if envs.VLLM_TORCHAX_ENABLED:
+                self.compute_logits_func(self.params_and_buffers, dummy_hidden,
+                                         None)
+            else:
+                torch._dynamo.mark_dynamic(dummy_hidden, 0)
+                self.compute_logits(dummy_hidden)
             logger.info("  -- num_seqs: %d", num_reqs)
         xm.wait_device_ops()
         end = time.perf_counter()
@@ -1312,6 +1310,30 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self,
         num_tokens: int,
     ) -> None:
+        # Bind empty KV cache tensors to the model.
+        kv_caches: dict[str, torch.Tensor] = {}
+        kv_cache_spec = self.get_kv_cache_spec()
+        for layer_name, layer_spec in kv_cache_spec.items():
+            if isinstance(layer_spec, AttentionSpec):
+                dtype = layer_spec.dtype
+                # Use an empty tensor instead of `None`` to force Dynamo to pass
+                # it by reference, rather by specializing on the value ``None``.
+                tpu_kv_cache = torch.tensor([],
+                                            dtype=dtype,
+                                            device=self.device)
+                kv_caches[layer_name] = tpu_kv_cache
+            else:
+                raise NotImplementedError(
+                    f"Unsupported KV cache spec '{type(layer_spec)}'")
+
+        runner_kv_caches: list[torch.Tensor] = []
+        bind_kv_cache(
+            kv_caches,
+            self.vllm_config.compilation_config.static_forward_context,
+            runner_kv_caches)
+        if envs.VLLM_TORCHAX_ENABLED:
+            self.kv_caches_dict = kv_caches
+
         # Profile with multimodal encoder & encoder cache.
         # TODO: handle encoder-decoder models once we support them.
         if (self.is_multimodal_model and self.max_num_encoder_input_tokens > 0
