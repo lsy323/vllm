@@ -7,6 +7,7 @@ import torch
 # Required to register custom ops.
 import torch_xla.experimental.custom_kernel  # noqa: F401
 
+import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
@@ -14,6 +15,10 @@ from vllm.config import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.utils import cdiv, next_power_of_2
+
+if envs.VLLM_TORCHAX_ENABLED:
+    # Register custom op dispatcher.
+    from vllm.compilation.torchax_wrapper import ragged_paged_attention
 
 logger = init_logger(__name__)
 
@@ -201,7 +206,12 @@ class PallasAttentionBackendImpl(AttentionImpl):
             forward_context: ForwardContext = get_forward_context()
             layer.kv_cache[forward_context.virtual_engine] = kv_cache
 
-        output = torch.ops.xla.ragged_paged_attention(
+        if envs.VLLM_TORCHAX_ENABLED:
+            ragged_paged_attention_op = ragged_paged_attention
+        else:
+            ragged_paged_attention_op = torch.ops.xla.ragged_paged_attention
+
+        output = ragged_paged_attention_op(
             query,
             kv_cache,
             attn_metadata.context_lens,
@@ -246,7 +256,8 @@ def write_to_kv_cache(
     kv = torch.cat([key, value], axis=-1).reshape(-1, num_combined_kv_heads,
                                                   head_size)
 
-    torch.ops.xla.dynamo_set_buffer_donor_(kv_cache, True)
+    if not envs.VLLM_TORCHAX_ENABLED:
+        torch.ops.xla.dynamo_set_buffer_donor_(kv_cache, True)
 
     kv_cache = kv_cache.reshape(-1, num_combined_kv_heads, head_size)
     kv_cache = kv_cache.index_copy(0, slot_mapping, kv)

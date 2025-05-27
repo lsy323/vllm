@@ -1461,16 +1461,16 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 compiled_model.original_code_object)
             compiled_model.compiled_codes.clear()
 
-    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def select_hidden_states(self, hidden_states, indices_do_sample):
         return hidden_states[indices_do_sample]
 
-    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def compute_logits(self,
                        sample_hidden_states: torch.Tensor) -> torch.Tensor:
         return self.model.compute_logits(sample_hidden_states, None)
 
-    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def sample_from_logits(
             self, logits: torch.Tensor,
             sampling_metadata: TPUSupportedSamplingMetadata) -> torch.Tensor:
