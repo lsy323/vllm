@@ -15,7 +15,6 @@ import vllm.envs as envs
 
 if envs.VLLM_TORCHAX_ENABLED:
     import torchax
-    # torchax.enable_globally()
     import jax
 
 import torch_xla.core.xla_model as xm
@@ -1396,59 +1395,58 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
-        env = torchax.default_env()
-        with env:
-            if len(kv_cache_config.kv_cache_groups) > 1:
-                raise NotImplementedError(
-                    "Hybrid models with more than one KV cache type are not "
-                    "supported yet.")
+        torchax.enable_globally()
+        if len(kv_cache_config.kv_cache_groups) > 1:
+            raise NotImplementedError(
+                "Hybrid models with more than one KV cache type are not "
+                "supported yet.")
 
-            self.input_batch = InputBatch(
-                max_num_reqs=self.max_num_reqs,
-                max_model_len=self.max_model_len,
-                max_num_batched_tokens=self.max_num_tokens,
-                device=self.device,
-                pin_memory=self.pin_memory,
-                vocab_size=self.model_config.get_vocab_size(),
-                kv_cache_config=kv_cache_config,
-            )
-            assert self.block_table_cpu.dtype == self.input_batch.block_table[
-                0].get_cpu_tensor().dtype
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.max_num_tokens,
+            device=self.device,
+            pin_memory=self.pin_memory,
+            vocab_size=self.model_config.get_vocab_size(),
+            kv_cache_config=kv_cache_config,
+        )
+        assert self.block_table_cpu.dtype == self.input_batch.block_table[
+            0].get_cpu_tensor().dtype
 
-            kv_caches: dict[str, torch.Tensor] = {}
+        kv_caches: dict[str, torch.Tensor] = {}
 
-            for kv_cache_group in kv_cache_config.kv_cache_groups:
-                kv_cache_spec = kv_cache_group.kv_cache_spec
-                for layer_name in kv_cache_group.layer_names:
-                    tensor_config = kv_cache_config.tensors[layer_name]
-                    assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
-                    num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
-                    if isinstance(kv_cache_spec, AttentionSpec):
-                        kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape(
-                            num_blocks, kv_cache_spec.block_size,
-                            kv_cache_spec.num_kv_heads,
-                            kv_cache_spec.head_size)
-                        dtype = kv_cache_spec.dtype
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            for layer_name in kv_cache_group.layer_names:
+                tensor_config = kv_cache_config.tensors[layer_name]
+                assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
+                num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
+                if isinstance(kv_cache_spec, AttentionSpec):
+                    kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape(
+                        num_blocks, kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
+                    dtype = kv_cache_spec.dtype
 
-                        tpu_kv_cache = torch.zeros(kv_cache_shape,
-                                                   dtype=dtype).to(self.device)
+                    tpu_kv_cache = torch.zeros(kv_cache_shape,
+                                               dtype=dtype).to(self.device)
 
-                        kv_caches[layer_name] = tpu_kv_cache
-                    else:
-                        raise NotImplementedError
+                    kv_caches[layer_name] = tpu_kv_cache
+                else:
+                    raise NotImplementedError
 
-            # kv_caches_cpu = {}
-            # for k, v in kv_caches.items():
-            #     kv_caches_cpu[k] = torch.zeros(v.shape, dtype=v.dtype)
-            #     print(kv_caches_cpu[k])
-            # torch.save(kv_caches_cpu,
-            #            '/home/lsiyuan/torchax_dump/kv_caches.pt')
-            bind_kv_cache(
-                kv_caches,
-                self.vllm_config.compilation_config.static_forward_context,
-                self.kv_caches,
-            )
-            self.kv_caches_dict = kv_caches
+        # kv_caches_cpu = {}
+        # for k, v in kv_caches.items():
+        #     kv_caches_cpu[k] = torch.zeros(v.shape, dtype=v.dtype)
+        #     print(kv_caches_cpu[k])
+        # torch.save(kv_caches_cpu,
+        #            '/home/lsiyuan/torchax_dump/kv_caches.pt')
+        bind_kv_cache(
+            kv_caches,
+            self.vllm_config.compilation_config.static_forward_context,
+            self.kv_caches,
+        )
+        self.kv_caches_dict = kv_caches
+        torchax.disable_globally()
 
     def reset_dynamo_cache(self):
         if self.is_multimodal_model:
