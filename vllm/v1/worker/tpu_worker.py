@@ -211,12 +211,17 @@ class TPUWorker:
         if self.rank < 1:
             if self.profile_dir is None:
                 raise RuntimeError("Profiler is not enabled.")
+            if not envs.VLLM_TORCHAX_ENABLED:
+                profiler = xp
+            else:
+                import jax
+                profiler = jax.profiler
             if is_start:
                 if self.profiler is None:
-                    self.profiler = xp.start_server(9012)
-                xp.start_trace(self.profile_dir)
+                    self.profiler = profiler.start_server(9012)
+                profiler.start_trace(self.profile_dir)
             else:
-                xp.stop_trace()
+                profiler.stop_trace()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
