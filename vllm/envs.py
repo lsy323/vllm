@@ -807,6 +807,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # If set, allow insecure serialization using pickle.
     # This is useful for environments where it is deemed safe to use the
+    # insecure method and it is needed for some reason.
     "VLLM_ALLOW_INSECURE_SERIALIZATION":
     lambda: bool(int(os.getenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "0"))),
 

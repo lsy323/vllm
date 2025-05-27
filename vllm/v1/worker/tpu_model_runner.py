@@ -811,42 +811,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                     attn_metadata,
                     self.vllm_config,
                     num_tokens=scheduler_output.total_num_scheduled_tokens):
-                logger.info(f"check attn_metadata {attn_metadata}")
-                logger.info(
-                    f"num_tokens {scheduler_output.total_num_scheduled_tokens}"
-                )
-                logger.info(f"check input_ids {input_ids}")
-                logger.info(f"check input_ids shape {input_ids.shape}")
-                logger.info(f"check input_ids dtype {input_ids.dtype}")
-                logger.info(f"check inputs_embeds {inputs_embeds}")
-                logger.info(
-                    f"check self.position_ids shape {self.position_ids.shape}")
-                logger.info(
-                    f"check self.position_ids dtype {self.position_ids.dtype}")
-                save_dict = {}
-                attn_metadata_torch_cpu = attn_metadata
-
-                attn_metadata_torch_cpu = pytree.tree_map_only(
-                    torch.Tensor, lambda x: x.torch().cpu(),
-                    attn_metadata_torch_cpu)
-                save_dict["attn_metadata"] = attn_metadata_torch_cpu
-                save_dict["attn_metadata"] = dict()
-                for key, value in attn_metadata_torch_cpu.items():
-                    assert isinstance(value, PallasMetadata)
-                    save_dict["attn_metadata"][key] = dict()
-                    save_dict["attn_metadata"][key]["slot_mapping"] \
-                        = value.slot_mapping.torch().cpu()
-                    save_dict["attn_metadata"][key]["block_tables"] \
-                        = value.block_tables.torch().cpu()
-                    save_dict["attn_metadata"][key]["context_lens"] \
-                        = value.context_lens.torch().cpu()
-                    save_dict["attn_metadata"][key]["query_start_loc"] \
-                        = value.query_start_loc.torch().cpu()
-                    save_dict["attn_metadata"][key]["num_seqs"] \
-                        = value.num_seqs.torch().cpu()
-                save_dict["input_ids"] = input_ids.torch().cpu()
-                save_dict["position_ids"] = self.position_ids.torch().cpu()
-                # torch.save(save_dict, "/tmp/attn_metadata.pt")
                 hidden_states = self.model(
                     input_ids=input_ids,
                     positions=self.position_ids,
@@ -1298,15 +1262,15 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         """
         Precompile all the subgraphs with possible input shapes.
         """
-        env = torchax.default_env()
-        with env:
-            self._precompile_mm_encoder()
-            self._precompile_backbone()
-            self._precompile_select_hidden_states()
-            self._precompile_compute_logits()
-            self._precompile_structured_decoding()
-            self._precompile_sample_from_logits()
-            self._precompile_gather_logprobs()
+        torchax.enable_globally()
+        self._precompile_mm_encoder()
+        self._precompile_backbone()
+        self._precompile_select_hidden_states()
+        self._precompile_compute_logits()
+        self._precompile_structured_decoding()
+        self._precompile_sample_from_logits()
+        self._precompile_gather_logprobs()
+        torchax.disable_globally()
 
     def profile_run(
         self,
