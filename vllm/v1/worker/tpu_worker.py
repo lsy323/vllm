@@ -198,7 +198,7 @@ class TPUWorker:
         tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
 
         torchax.disable_globally()
-        return int(tpu_kv_cache_bytes) // 1024
+        return int(tpu_kv_cache_bytes)
 
     def execute_model(
         self,

@@ -467,15 +467,7 @@ def safetensors_weights_iterator(
     ):
         with safe_open(st_file, framework="pt") as f:
             for name in f.keys():  # noqa: SIM118
-                # Torchax does not support loading
-                # safetensors files.
-                # if envs.VLLM_TORCHAX_ENABLED:
-                #     import torchax
-                #     torchax.disable_globally()
                 param = f.get_tensor(name)
-                # if envs.VLLM_TORCHAX_ENABLED:
-                #     torchax.enable_globally()
-                #     param = param.to("jax")
                 yield name, param
 
 

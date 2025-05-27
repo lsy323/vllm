@@ -198,13 +198,14 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
         assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         num_tokens, hidden_size = query.shape
-        query = query.reshape(num_tokens, self.num_heads, self.head_size)
+        query = query.view(num_tokens, self.num_heads, self.head_size)
 
         if kv_cache.numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
             kv_cache = write_to_kv_cache(key, value, kv_cache, slot_mapping)
-            forward_context: ForwardContext = get_forward_context()
-            layer.kv_cache[forward_context.virtual_engine] = kv_cache
+            if envs.VLLM_TORCHAX_ENABLED:
+                forward_context: ForwardContext = get_forward_context()
+                layer.kv_cache[forward_context.virtual_engine] = kv_cache
 
         if envs.VLLM_TORCHAX_ENABLED:
             ragged_paged_attention_op = ragged_paged_attention
@@ -250,8 +251,8 @@ def write_to_kv_cache(
     num_blocks, block_size, num_combined_kv_heads, head_size = kv_cache.shape
     num_kv_heads = num_combined_kv_heads // 2
 
-    key = key.reshape(-1, num_kv_heads, head_size)
-    value = value.reshape(-1, num_kv_heads, head_size)
+    key = key.view(-1, num_kv_heads, head_size)
+    value = value.view(-1, num_kv_heads, head_size)
 
     kv = torch.cat([key, value], axis=-1).reshape(-1, num_combined_kv_heads,
                                                   head_size)

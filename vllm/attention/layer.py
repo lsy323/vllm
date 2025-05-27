@@ -14,15 +14,12 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group,
                                           is_v1_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import _Backend, current_platform
 from vllm.utils import direct_register_custom_op
-
-logger = init_logger(__name__)
 
 
 class Attention(nn.Module):
@@ -58,17 +55,6 @@ class Attention(nn.Module):
         The KV cache is stored inside this class and is accessed via
         `self.kv_cache`.
         """
-        logger.info(
-            f"Initializing Attention with args: num_heads={num_heads}, "
-            f"head_size={head_size}, scale={scale}, num_kv_heads={num_kv_heads}, "
-            f"alibi_slopes={alibi_slopes is not None}, "
-            f"cache_config={cache_config}, "
-            f"quant_config={quant_config is not None}, "
-            f"blocksparse_params={blocksparse_params is not None}, "
-            f"logits_soft_cap={logits_soft_cap}, "
-            f"per_layer_sliding_window={per_layer_sliding_window}, "
-            f"use_mla={use_mla}, prefix={prefix}, attn_type={attn_type}, "
-            f"extra_impl_args={extra_impl_args}")
         super().__init__()
         if per_layer_sliding_window is not None:
             # per-layer sliding window
@@ -237,7 +223,7 @@ class Attention(nn.Module):
             else:
                 torch.ops.vllm.unified_attention_with_output(
                     query, key, value, output, self.layer_name)
-            return output.reshape(-1, hidden_size)
+            return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
                 forward_context = get_forward_context()
