@@ -25,7 +25,6 @@ def main():
         max_num_batched_tokens=64,
         max_num_seqs=4,
         max_model_len=128,
-        enforce_eager=False,
     )
     outputs = llm.generate(prompts, sampling_params)
     print("-" * 50)
