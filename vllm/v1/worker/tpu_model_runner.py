@@ -796,12 +796,14 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         num_reqs = self.input_batch.num_reqs
         # Run the decoder
         if not envs.VLLM_TORCHAX_EAGER:
-            static_forward_context = self.vllm_config.compilation_config.static_forward_context
             input_args = (input_ids, self.position_ids)
+            num_scheduled_tokens_padded = input_ids.shape[0]
             hidden_states, new_kv_caches = self.model_func(
                 self.params_and_buffers, input_args, self.kv_caches_dict,
-                attn_metadata, scheduler_output.total_num_scheduled_tokens)
+                attn_metadata, num_scheduled_tokens_padded)
             # Set the new KV caches to the static forward context.
+            static_forward_context = self.vllm_config.compilation_config.\
+                                            static_forward_context
             for layer_name, kv_cache in new_kv_caches.items():
                 # NOTE: Use list because of virtual engine.
                 static_forward_context[layer_name].kv_cache = [kv_cache]
@@ -1050,7 +1052,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             out, new_kv_caches = self.model_func(self.params_and_buffers,
                                                  input_args,
                                                  self.kv_caches_dict,
-                                                 per_layer_attn_metadata, 0)
+                                                 per_layer_attn_metadata,
+                                                 num_tokens)
             # Set the new KV caches to the static forward context.
             static_forward_context = \
                 self.vllm_config.compilation_config.static_forward_context
@@ -1063,7 +1066,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                     self.lora_config,
                     np.array([num_tokens],
                              dtype=np.int32)), set_forward_context(
-                                 per_layer_attn_metadata, self.vllm_config, 0):
+                                 per_layer_attn_metadata, self.vllm_config,
+                                 num_tokens):
                 out = self.model(input_ids=input_ids,
                                  positions=position_ids,
                                  inputs_embeds=inputs_embeds)
