@@ -788,8 +788,13 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             mm_embeds = []
         xm.mark_step()
         # Prepare inputs
+        prepare_inputs_start = time.perf_counter()
         attn_metadata, logits_indices, padded_num_reqs = self._prepare_inputs(
             scheduler_output)
+        prepare_inputs_end = time.perf_counter()
+        logger.info(
+            f"Time spent on _prepare_inputs: {prepare_inputs_end - prepare_inputs_start:.6f} seconds"
+        )
         input_ids, inputs_embeds = self._get_model_inputs(
             self.input_ids, mm_embeds)
         xm.mark_step()
