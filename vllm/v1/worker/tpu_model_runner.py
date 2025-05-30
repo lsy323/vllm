@@ -18,7 +18,6 @@ if envs.VLLM_TORCHAX_ENABLED:
     import jax
     import jax.numpy as jnp
 
-import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 from torch.utils import _pytree as pytree
 
@@ -699,10 +698,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             # 2. A list or tuple (length: num_items) of tensors, each of shape
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
-            xm.mark_step()
+            # xm.mark_step()
             curr_group_outputs = self.model.get_multimodal_embeddings(
                 **batched_mm_inputs)
-            xm.mark_step()
+            # xm.mark_step()
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -794,7 +793,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
-        torchax.enable_globally()
+        # torchax.enable_globally()
         # Update cached state
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
@@ -807,9 +806,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             mm_embeds = self._gather_mm_embeddings(scheduler_output)
         else:
             mm_embeds = []
-        xm.mark_step()
+        # xm.mark_step()
         # Prepare inputs
-        torchax.disable_globally()
+        # torchax.disable_globally()
         # prepare_inputs_start = time.perf_counter()
         attn_metadata, logits_indices, padded_num_reqs = self._prepare_inputs(
             scheduler_output)
@@ -817,10 +816,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # logger.info(
         #     f"Time spent on _prepare_inputs: {prepare_inputs_end - prepare_inputs_start:.6f} seconds"
         # )
-        torchax.enable_globally()
+        # torchax.enable_globally()
         input_ids, inputs_embeds = self._get_model_inputs(
             self.input_ids, mm_embeds)
-        xm.mark_step()
+        # xm.mark_step()
         num_reqs = self.input_batch.num_reqs
         # Run the decoder
         if not envs.VLLM_TORCHAX_EAGER:
@@ -951,7 +950,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Check there are no new graphs compiled - all the graphs should be
         # captured and compiled during warm up.
         self._verify_num_xla_graphs("execute_model")
-        torchax.disable_globally()
+        # torchax.disable_globally()
+        # gc.collect()
         return model_runner_output
 
     def load_model(self) -> None:
@@ -976,31 +976,34 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             model = tpu_loader.load_model(None, vllm_config=self.vllm_config)
 
             # Extract all params and buffers for functional call.
-            torchax.enable_globally()
-            from torchax.interop import extract_all_buffers
-            params, buffers = extract_all_buffers(model)
-            # Need to explicitly move to jax device, because `model.to('jax')`
-            # won't move tensors on python attributes to jax device.
-            self.params_and_buffers = {**params, **buffers}
-            self.params_and_buffers = pytree.tree_map_only(
-                torch.Tensor, lambda x: x.to('jax'), self.params_and_buffers)
+            # torchax.enable_globally()
+            with self.torchax_env:
+                from torchax.interop import extract_all_buffers
+                params, buffers = extract_all_buffers(model)
+                # Need to explicitly move to jax device, because `model.to('jax')`
+                # won't move tensors on python attributes to jax device.
+                self.params_and_buffers = {**params, **buffers}
+                self.params_and_buffers = pytree.tree_map_only(
+                    torch.Tensor, lambda x: x.to('jax'),
+                    self.params_and_buffers)
 
-            # Create a function for model.forward
-            from vllm.compilation.torchax_wrapper import wrap_model
-            static_forward_context = \
-                self.vllm_config.compilation_config.static_forward_context
-            wrapped_model_forward = wrap_model(
-                model,
-                self.vllm_config,
-                static_forward_context,
-            )
-            self.model_func = wrapped_model_forward
+                # Create a function for model.forward
+                from vllm.compilation.torchax_wrapper import wrap_model
+                static_forward_context = \
+                    self.vllm_config.compilation_config.static_forward_context
+                wrapped_model_forward = wrap_model(
+                    model,
+                    self.vllm_config,
+                    static_forward_context,
+                )
+                self.model_func = wrapped_model_forward
 
-            # Create a function for model.compute_logits
-            from vllm.compilation.torchax_wrapper import wrap_model_func
-            self.compute_logits_func = wrap_model_func(model, "compute_logits")
+                # Create a function for model.compute_logits
+                from vllm.compilation.torchax_wrapper import wrap_model_func
+                self.compute_logits_func = wrap_model_func(
+                    model, "compute_logits")
 
-            torchax.disable_globally()
+            # torchax.disable_globally()
         else:
             with patch(
                     "vllm.model_executor.layers.vocab_parallel_embedding."
@@ -1014,8 +1017,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         # Sync all pending XLA execution during model initialization and weight
         # loading.
-        xm.mark_step()
-        xm.wait_device_ops()
+        # xm.mark_step()
+        # xm.wait_device_ops()
         self.model = model
         self.sampler = TPUSampler()
 
@@ -1116,10 +1119,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 batched_dummy_mm_inputs = self._get_mm_dummy_batch(
                     mode, num_items)
                 # Run multimodal encoder.
-                xm.mark_step()
+                # xm.mark_step()
                 mm_embeds = self.model.\
                     get_multimodal_embeddings(**batched_dummy_mm_inputs)
-                xm.mark_step()
+                # xm.mark_step()
                 num_patches = mm_embeds[0].shape[0]
                 items_size = num_patches * num_items
 
@@ -1144,7 +1147,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                         a, b = self._get_model_inputs(placeholders_ids,
                                                       [mm_embeds])
                         assert a is None
-                        xm.mark_step()
+                        # xm.mark_step()
 
             # Pre-compile `get_input_embeddings` when mm_embeddings are not
             # present. Chunk is only made of text, no mm_placeholders.
@@ -1155,9 +1158,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 placeholders_ids = placeholders_ids.to(self.device)
                 a, b = self._get_model_inputs(placeholders_ids, [])
                 assert a is None
-                xm.mark_step()
+                # xm.mark_step()
 
-            xm.wait_device_ops()
+            # xm.wait_device_ops()
             end = time.perf_counter()
             logger.info(
                 "Multimodal %s Encoder compilation finished in in %.2f "
@@ -1169,7 +1172,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         for num_tokens in self.num_tokens_paddings:
             logger.info("  -- num_tokens: %d", num_tokens)
             self._dummy_run(num_tokens)
-        xm.wait_device_ops()
+        # xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
         self._update_num_xla_graphs("model backbone")
@@ -1198,7 +1201,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 # next bigger value in case num_tokens uses bucketed padding.
                 if num_reqs >= min(num_tokens, self.max_num_reqs):
                     break
-        xm.wait_device_ops()
+        # xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
         self._update_num_xla_graphs("select_hidden_states")
@@ -1218,7 +1221,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 torch._dynamo.mark_dynamic(dummy_hidden, 0)
                 self.compute_logits(dummy_hidden)
             logger.info("  -- num_seqs: %d", num_reqs)
-        xm.wait_device_ops()
+        # xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
         self._update_num_xla_graphs("compute_logits")
@@ -1242,7 +1245,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             self.structured_decode(dummy_require_struct_decoding,
                                    dummy_grammar_bitmask, dummy_logits, arange)
             logger.info("  -- num_seqs: %d", num_reqs)
-        xm.wait_device_ops()
+        # xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
         self._update_num_xla_graphs("structured_decoding")
@@ -1269,7 +1272,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 sampling_metadata.all_greedy = all_greedy
                 self.sample_from_logits(dummy_logits, sampling_metadata)
             logger.info("  -- num_seqs: %d", num_reqs)
-        xm.wait_device_ops()
+        # xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
         self._update_num_xla_graphs("sample_from_logits")
@@ -1285,7 +1288,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                        dtype=torch.int64).to(self.device)
             self.gather_logprobs(dummy_logits, dummy_tokens)
             logger.info("  -- num_seqs: %d", num_reqs)
-        xm.wait_device_ops()
+        # xm.wait_device_ops()
         end = time.perf_counter()
         logger.info("Compilation finished in %.2f [secs].", end - start)
         self._update_num_xla_graphs("gather_logprobs")
@@ -1294,15 +1297,16 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         """
         Precompile all the subgraphs with possible input shapes.
         """
-        torchax.enable_globally()
-        self._precompile_mm_encoder()
-        self._precompile_backbone()
-        self._precompile_select_hidden_states()
-        self._precompile_compute_logits()
-        self._precompile_structured_decoding()
-        self._precompile_sample_from_logits()
-        self._precompile_gather_logprobs()
-        torchax.disable_globally()
+        # torchax.enable_globally()
+        with self.torchax_env:
+            self._precompile_mm_encoder()
+            self._precompile_backbone()
+            self._precompile_select_hidden_states()
+            self._precompile_compute_logits()
+            self._precompile_structured_decoding()
+            self._precompile_sample_from_logits()
+            self._precompile_gather_logprobs()
+        # torchax.disable_globally()
 
     def profile_run(
         self,
@@ -1359,11 +1363,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             # Isolate encoder graph from post-processing to minimize
             # impact of recompilation until it's fixed.
             start = time.perf_counter()
-            xm.mark_step()
+            # xm.mark_step()
             dummy_encoder_outputs = self.model.get_multimodal_embeddings(
                 **batched_dummy_mm_inputs)
-            xm.mark_step()
-            xm.wait_device_ops()
+            # xm.mark_step()
+            # xm.wait_device_ops()
             end = time.perf_counter()
             logger.info(
                 "Multimodal Encoder profiling finished in in %.2f [secs].",
@@ -1382,8 +1386,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Trigger compilation for general shape.
         self._dummy_run(num_tokens)
 
-        xm.mark_step()
-        xm.wait_device_ops()
+        # xm.mark_step()
+        # xm.wait_device_ops()
         self.encoder_cache.clear()
         gc.collect()
 
@@ -1459,16 +1463,16 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 compiled_model.original_code_object)
             compiled_model.compiled_codes.clear()
 
-    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def select_hidden_states(self, hidden_states, indices_do_sample):
         return hidden_states[indices_do_sample]
 
-    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def compute_logits(self,
                        sample_hidden_states: torch.Tensor) -> torch.Tensor:
         return self.model.compute_logits(sample_hidden_states, None)
 
-    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def sample_from_logits(
             self, logits: torch.Tensor,
             sampling_metadata: TPUSupportedSamplingMetadata) -> torch.Tensor:
@@ -1483,7 +1487,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                       sampling_metadata).sampled_token_ids
         return out_tokens
 
-    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def gather_logprobs(self, logits: torch.Tensor,
                         sampled_tokens: torch.Tensor) -> LogprobsTensors:
         """
@@ -1497,7 +1501,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             self.model_config.max_logprobs,
             token_ids=sampled_tokens.squeeze(-1))
 
-    @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
+    # @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def structured_decode(self, require_struct_decoding: torch.Tensor,
                           grammar_bitmask: torch.Tensor, logits: torch.Tensor,
                           arange: torch.Tensor) -> torch.Tensor:
