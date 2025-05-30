@@ -16,6 +16,7 @@ import vllm.envs as envs
 if envs.VLLM_TORCHAX_ENABLED:
     import torchax
     import jax
+    import jax.numpy as jnp
 
 import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
@@ -180,6 +181,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.kv_caches_dict: dict[str, torch.Tensor] = dict()
         self.model_func = None
         self.compute_logits_func = None
+        self.torchax_env = torchax.default_env()
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: dict[str, dict[int, torch.Tensor]] = {}
         # self.input_batch: InputBatch  # Persistent batch.
@@ -462,6 +464,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         return kv_cache_spec
 
+    def _create_torchax_array(self, torch_tensor):
+        return torchax.tensor.Tensor(jnp.array(torch_tensor.numpy()),
+                                     self.torchax_env)
+
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -552,25 +558,39 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Zero out to avoid spurious values from prev iteration (last cp chunk)
         self.input_ids_cpu[
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
-        self.input_ids = self.input_ids_cpu[:
-                                            padded_total_num_scheduled_tokens].to(
-                                                self.device)
-        self.position_ids = self.positions_cpu[:
-                                               padded_total_num_scheduled_tokens].to(
-                                                   self.device)
+
+        # self.input_ids = self.input_ids_cpu[:
+        #                                     padded_total_num_scheduled_tokens].to(
+        #                                         self.device)
+
+        self.input_ids = self._create_torchax_array(
+            self.input_ids_cpu[:padded_total_num_scheduled_tokens])
+        # self.position_ids = self.positions_cpu[:
+        #                                        padded_total_num_scheduled_tokens].to(
+        #                                            self.device)
+        self.position_ids = self._create_torchax_array(
+            self.positions_cpu[:padded_total_num_scheduled_tokens])
         self.input_batch.block_table[0].slot_mapping_cpu[
             total_num_scheduled_tokens:] = _PAD_SLOT_ID
-        slot_mapping = (
+        # slot_mapping = (
+        #     self.input_batch.block_table[0].
+        #     slot_mapping_cpu[:padded_total_num_scheduled_tokens].to(
+        #         self.device))
+        slot_mapping = self._create_torchax_array(
             self.input_batch.block_table[0].
-            slot_mapping_cpu[:padded_total_num_scheduled_tokens].to(
-                self.device))
+            slot_mapping_cpu[:padded_total_num_scheduled_tokens])
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
             self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs])
-        block_tables = block_tables.to(self.device)
-        query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1].to(
-            self.device)
-        seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
+        # block_tables = block_tables.to(self.device)
+        block_tables = self._create_torchax_array(block_tables)
+        # query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1].to(
+        #     self.device)
+        query_start_loc = self._create_torchax_array(
+            self.query_start_loc_cpu[:self.max_num_reqs + 1])
+        # seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
+        seq_lens = self._create_torchax_array(
+            self.seq_lens_cpu[:self.max_num_reqs])
 
         if self.lora_config is not None:
             # We need to respect padding when activating LoRA adapters
@@ -583,14 +603,14 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             self.set_active_loras(self.input_batch,
                                   padded_num_scheduled_tokens_per_req)
 
+        num_seqs = torchax.tensor.Tensor(
+            jnp.array([num_reqs], dtype=jnp.int32), self.torchax_env)
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,
             context_lens=seq_lens,
             query_start_loc=query_start_loc,
-            num_seqs=torch.tensor([num_reqs],
-                                  dtype=torch.int32,
-                                  device=self.device),
+            num_seqs=num_seqs,
         )
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
@@ -602,7 +622,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Indices at which we sample (positions of last token in the sequence).
         # Padded to avoid recompiling when `num_reqs` varies.
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
-        logits_indices = logits_indices.to(self.device)
+        # logits_indices = logits_indices.to(self.device)
+        logits_indices = self._create_torchax_array(logits_indices)
 
         layer_names = get_layers_from_vllm_config(self.vllm_config,
                                                   Attention).keys()
@@ -788,13 +809,15 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             mm_embeds = []
         xm.mark_step()
         # Prepare inputs
-        prepare_inputs_start = time.perf_counter()
+        torchax.disable_globally()
+        # prepare_inputs_start = time.perf_counter()
         attn_metadata, logits_indices, padded_num_reqs = self._prepare_inputs(
             scheduler_output)
-        prepare_inputs_end = time.perf_counter()
-        logger.info(
-            f"Time spent on _prepare_inputs: {prepare_inputs_end - prepare_inputs_start:.6f} seconds"
-        )
+        # prepare_inputs_end = time.perf_counter()
+        # logger.info(
+        #     f"Time spent on _prepare_inputs: {prepare_inputs_end - prepare_inputs_start:.6f} seconds"
+        # )
+        torchax.enable_globally()
         input_ids, inputs_embeds = self._get_model_inputs(
             self.input_ids, mm_embeds)
         xm.mark_step()
