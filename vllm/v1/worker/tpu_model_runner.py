@@ -1000,34 +1000,32 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             model = tpu_loader.load_model(None, vllm_config=self.vllm_config)
 
             # Extract all params and buffers for functional call.
-            # torchax.enable_globally()
-            with self.torchax_env:
-                from torchax.interop import extract_all_buffers
-                params, buffers = extract_all_buffers(model)
-                # Need to explicitly move to jax device, because `model.to('jax')`
-                # won't move tensors on python attributes to jax device.
-                self.params_and_buffers = {**params, **buffers}
-                self.params_and_buffers = pytree.tree_map_only(
-                    torch.Tensor, lambda x: x.to('jax'),
-                    self.params_and_buffers)
+            torchax.enable_globally()
+            # with self.torchax_env:
+            from torchax.interop import extract_all_buffers
+            params, buffers = extract_all_buffers(model)
+            # Need to explicitly move to jax device, because `model.to('jax')`
+            # won't move tensors on python attributes to jax device.
+            self.params_and_buffers = {**params, **buffers}
+            self.params_and_buffers = pytree.tree_map_only(
+                torch.Tensor, lambda x: x.to('jax'), self.params_and_buffers)
 
-                # Create a function for model.forward
-                from vllm.compilation.torchax_wrapper import wrap_model
-                static_forward_context = \
-                    self.vllm_config.compilation_config.static_forward_context
-                wrapped_model_forward = wrap_model(
-                    model,
-                    self.vllm_config,
-                    static_forward_context,
-                )
-                self.model_func = wrapped_model_forward
+            # Create a function for model.forward
+            from vllm.compilation.torchax_wrapper import wrap_model
+            static_forward_context = \
+                self.vllm_config.compilation_config.static_forward_context
+            wrapped_model_forward = wrap_model(
+                model,
+                self.vllm_config,
+                static_forward_context,
+            )
+            self.model_func = wrapped_model_forward
 
-                # Create a function for model.compute_logits
-                from vllm.compilation.torchax_wrapper import wrap_model_func
-                self.compute_logits_func = wrap_model_func(
-                    model, "compute_logits")
+            # Create a function for model.compute_logits
+            from vllm.compilation.torchax_wrapper import wrap_model_func
+            self.compute_logits_func = wrap_model_func(model, "compute_logits")
 
-            # torchax.disable_globally()
+            torchax.disable_globally()
         else:
             with patch(
                     "vllm.model_executor.layers.vocab_parallel_embedding."
@@ -1144,10 +1142,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
     def _set_active_loras(self, prompt_lora_mapping, token_lora_mapping,
                           lora_requests) -> None:
-        xm.mark_step()  # Captures input updates
+        # xm.mark_step()  # Captures input updates
         super()._set_active_loras(prompt_lora_mapping, token_lora_mapping,
                                   lora_requests)
-        xm.mark_step()  # Captures metadata updates
+        # xm.mark_step()  # Captures metadata updates
 
     def _precompile_mm_encoder(self) -> None:
         # Pre-compile MM encoder for all supported data modalities.
@@ -1348,15 +1346,15 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         Precompile all the subgraphs with possible input shapes.
         """
         # torchax.enable_globally()
-        with self.torchax_env:
-            with self.maybe_setup_dummy_loras(self.lora_config):
-                self._precompile_mm_encoder()
-                self._precompile_backbone()
-                self._precompile_select_hidden_states()
-                self._precompile_compute_logits()
-                self._precompile_structured_decoding()
-                self._precompile_sample_from_logits()
-                self._precompile_gather_logprobs()
+        # with self.torchax_env:
+        with self.maybe_setup_dummy_loras(self.lora_config):
+            self._precompile_mm_encoder()
+            self._precompile_backbone()
+            self._precompile_select_hidden_states()
+            self._precompile_compute_logits()
+            self._precompile_structured_decoding()
+            self._precompile_sample_from_logits()
+            self._precompile_gather_logprobs()
         # torchax.disable_globally()
 
     def profile_run(
@@ -1733,11 +1731,11 @@ def replace_set_lora(model):
         # to a tensor doesn't seem to work anymore. This might be fixed with a
         # later release of torch_xla.
         self._original_set_lora(index, lora_a, lora_b, embeddings_tensor, bias)
-        xm.mark_step()
+        # xm.mark_step()
 
     def _tpu_reset_lora(self, index: int):
         self._original_reset_lora(index)
-        xm.mark_step()
+        # xm.mark_step()
 
     for _, module in model.named_modules():
         if isinstance(module, BaseLayerWithLoRA):

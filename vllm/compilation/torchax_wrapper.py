@@ -4,9 +4,33 @@ import functools
 import jax
 import torch
 from torch.nn.utils import stateless as torch_stateless
-from torchax.interop import call_jax, jax_jit
+
+try:
+    import torchax
+    from torchax.interop import call_jax, jax_jit
+    TORCHAX_AVAILABLE = True
+except ImportError:
+    TORCHAX_AVAILABLE = False
 
 from vllm.forward_context import set_forward_context
+
+
+def with_torchax_global(func):
+    """Decorator that enables torchax globally before function call and 
+    disables after. Does nothing if torchax is not installed."""
+    if not TORCHAX_AVAILABLE:
+        return func
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        torchax.enable_globally()
+        try:
+            result = func(*args, **kwargs)
+            return result
+        finally:
+            torchax.disable_globally()
+
+    return wrapper
 
 
 def wrap_model(m, vllm_config, static_forward_context):

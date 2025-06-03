@@ -11,13 +11,13 @@ import vllm.envs as envs
 
 if envs.VLLM_TORCHAX_ENABLED:
     import jax
-    import torchax
 
 import torch_xla.core.xla_model as xm
 import torch_xla.debug.profiler as xp
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
+from vllm.compilation.torchax_wrapper import with_torchax_global
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -89,6 +89,7 @@ class TPUWorker:
         if self.model_config.seed is None:
             self.model_config.seed = 0
 
+    @with_torchax_global
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
         # Note: Currently the XLA compiler wrongly uses 2D ring strategy on 1D
@@ -153,8 +154,8 @@ class TPUWorker:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
 
+    @with_torchax_global
     def determine_available_memory(self) -> int:
-        torchax.enable_globally()
         # `max_num_tokens >= max_num_batched_tokens` due to padding.
         with self.model_runner.maybe_setup_dummy_loras(self.lora_config):
             self.model_runner.profile_run(self.model_runner.max_num_tokens)
@@ -194,7 +195,6 @@ class TPUWorker:
                                  self.cache_config.gpu_memory_utilization)
         tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
 
-        torchax.disable_globally()
         return int(tpu_kv_cache_bytes)
 
     def execute_model(
@@ -226,6 +226,7 @@ class TPUWorker:
     def load_model(self) -> None:
         self.model_runner.load_model()
 
+    @with_torchax_global
     def compile_or_warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
