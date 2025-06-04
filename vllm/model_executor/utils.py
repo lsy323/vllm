@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utils for model executor."""
 import copy
 from typing import Any, Optional
@@ -49,8 +50,8 @@ def _make_synced_weight_loader(original_weight_loader):
 
     def _synced_weight_loader(param, *args, **kwargs):
         original_weight_loader(param, *args, **kwargs)
-        if param.device != torch.device('cpu'):
-            # torch._sync doesn't work on CPU tensors.
+        # torch._sync doesn't support, is not needed for CPU tensors.
+        if param.device != torch.device("cpu"):
             torch._sync(param)
 
     return _synced_weight_loader
