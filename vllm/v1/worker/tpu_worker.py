@@ -10,14 +10,14 @@ import torch.nn as nn
 
 import vllm.envs as envs
 
-if envs.VLLM_TORCHAX_ENABLED:
+VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
+if VLLM_TORCHAX_ENABLED:
     import jax
 
 import torch_xla.core.xla_model as xm
 import torch_xla.debug.profiler as xp
 import torch_xla.runtime as xr
 
-import vllm.envs as envs
 from vllm.compilation.torchax_wrapper import with_torchax_global
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
@@ -118,7 +118,7 @@ class TPUWorker:
 
         # Device initialization should happen after initializing
         # the distributed runtime.
-        if envs.VLLM_TORCHAX_ENABLED:
+        if VLLM_TORCHAX_ENABLED:
             self.device = torch.device("jax:0")
         else:
             self.device = xm.xla_device()
@@ -127,13 +127,13 @@ class TPUWorker:
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
-        if envs.VLLM_TORCHAX_ENABLED:
+        if VLLM_TORCHAX_ENABLED:
             rank = jax.process_index()
         else:
             rank = xr.global_ordinal()
 
         if self.model_config.seed is not None:
-            if not envs.VLLM_TORCHAX_ENABLED:
+            if not VLLM_TORCHAX_ENABLED:
                 xm.set_rng_state(self.model_config.seed, self.device)
 
         # Increase the cache size limit, which is the maximum number of
@@ -184,7 +184,7 @@ class TPUWorker:
 
         # Get the maximum amount of memory used by the model weights and
         # intermediate activations.
-        if envs.VLLM_TORCHAX_ENABLED:
+        if VLLM_TORCHAX_ENABLED:
             m = jax.local_devices()[0].memory_stats()
             total_memory_size = m["bytes_limit"]
             current_mem = m["bytes_in_use"]
@@ -229,7 +229,7 @@ class TPUWorker:
         if self.rank < 1:
             if self.profile_dir is None:
                 raise RuntimeError("Profiler is not enabled.")
-            if not envs.VLLM_TORCHAX_ENABLED:
+            if not VLLM_TORCHAX_ENABLED:
                 profiler = xp
             else:
                 import jax

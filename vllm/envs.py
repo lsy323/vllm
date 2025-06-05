@@ -116,8 +116,6 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
-    VLLM_TORCHAX_ENABLED: bool = False
-    VLLM_TORCHAX_EAGER: bool = False
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5557
@@ -809,14 +807,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # limit will actually be zero-copy decoded.
     "VLLM_MSGPACK_ZERO_COPY_THRESHOLD":
     lambda: int(os.getenv("VLLM_MSGPACK_ZERO_COPY_THRESHOLD", "256")),
-
-    # Lower Pytorch to TPU via Torchax.
-    "VLLM_TORCHAX_ENABLED":
-    lambda: bool(int(os.getenv("VLLM_TORCHAX_ENABLED", "0"))),
-
-    # If set, use eager mode for Torchax.
-    "VLLM_TORCHAX_EAGER":
-    lambda: bool(int(os.getenv("VLLM_TORCHAX_EAGER", "0"))),
 
     # If set, allow insecure serialization using pickle.
     # This is useful for environments where it is deemed safe to use the

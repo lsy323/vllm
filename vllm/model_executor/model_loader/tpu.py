@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
 import time
 from typing import Optional
 
@@ -8,7 +9,6 @@ import torch_xla.core.xla_model as xm
 import torch_xla.distributed.spmd as xs
 import torchax
 
-from vllm import envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed.tpu_distributed_utils import get_fqn, shard_model
 from vllm.logger import init_logger
@@ -17,6 +17,8 @@ from vllm.model_executor.model_loader.utils import (
     initialize_model, process_weights_after_loading, set_default_torch_dtype)
 
 logger = init_logger(__name__)
+
+VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
 
 
 class TPUModelLoader(DefaultModelLoader):
@@ -69,7 +71,7 @@ class TPUModelLoader(DefaultModelLoader):
 
         counter_before_partition = time.perf_counter()
         model = model.eval()
-        if not envs.VLLM_TORCHAX_ENABLED:
+        if not VLLM_TORCHAX_ENABLED:
             model = model.to('xla')
             shard_model(model, mesh)
         else:
@@ -80,7 +82,7 @@ class TPUModelLoader(DefaultModelLoader):
         logger.info("Partition model took %.2f seconds",
                     counter_after_partition - counter_before_partition)
 
-        if envs.VLLM_TORCHAX_ENABLED:
+        if VLLM_TORCHAX_ENABLED:
             # If torchax is enabled, we return the model directly.
             # The model is already partitioned and compiled.
             return model

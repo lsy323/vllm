@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import bisect
 import gc
+import os
 import time
 from typing import TYPE_CHECKING, Optional, cast
 from unittest.mock import patch
@@ -16,7 +17,9 @@ import torch_xla.runtime as xr
 # TPU XLA related
 import vllm.envs as envs
 
-if envs.VLLM_TORCHAX_ENABLED:
+VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
+VLLM_TORCHAX_EAGER = os.environ.get('VLLM_TORCHAX_EAGER', '0') == '1'
+if VLLM_TORCHAX_ENABLED:
     import torchax
     import jax
     import jax.numpy as jnp
@@ -302,7 +305,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                        max_num_mm_items_decoder_budget)
                 self.max_num_mm_items_by_modality[modality] = max_num_mm_items
 
-        if not self.use_spmd and not envs.VLLM_TORCHAX_ENABLED:
+        if not self.use_spmd and not VLLM_TORCHAX_ENABLED:
             self.sample_from_logits_func = torch.compile(
                 self.sample_from_logits,
                 backend="openxla",
@@ -886,7 +889,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # xm.mark_step()
         num_reqs = self.input_batch.num_reqs
         # Run the decoder
-        if not envs.VLLM_TORCHAX_EAGER:
+        if not VLLM_TORCHAX_EAGER:
             input_args = (input_ids, self.position_ids)
             num_scheduled_tokens_padded = input_ids.shape[0]
             hidden_states, new_kv_caches = self.model_func(
@@ -911,7 +914,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 )
         hidden_states = self.select_hidden_states(hidden_states,
                                                   logits_indices)
-        if not envs.VLLM_TORCHAX_EAGER:
+        if not VLLM_TORCHAX_EAGER:
             logits = self.compute_logits_func(self.params_and_buffers,
                                               hidden_states, None)
         else:
@@ -1029,12 +1032,12 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # determine the order of concatenating the output tensors.
         # As a workaround, we use the xm's rank assignment only when loading
         # the embedding weights.
-        if envs.VLLM_TORCHAX_ENABLED:
+        if VLLM_TORCHAX_ENABLED:
             xm_tp_rank = jax.process_index()
         else:
             xm_tp_rank = xr.global_ordinal()
 
-        if envs.VLLM_TORCHAX_ENABLED:
+        if VLLM_TORCHAX_ENABLED:
             tpu_loader = TPUModelLoader(
                 load_config=self.vllm_config.load_config)
             model = tpu_loader.load_model(
@@ -1158,7 +1161,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             for layer_name in layer_names
         }
 
-        if envs.VLLM_TORCHAX_ENABLED:
+        if VLLM_TORCHAX_ENABLED:
             input_args = (input_ids, position_ids)
             out, new_kv_caches = self.model_func(self.params_and_buffers,
                                                  input_args,
@@ -1301,7 +1304,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             dummy_hidden = torch.zeros((num_reqs, hsize),
                                        device=self.device,
                                        dtype=self._hidden_states_dtype)
-            if envs.VLLM_TORCHAX_ENABLED:
+            if VLLM_TORCHAX_ENABLED:
                 self.compute_logits_func(self.params_and_buffers, dummy_hidden,
                                          None)
             else:
@@ -1427,7 +1430,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             runner_kv_caches)
-        if envs.VLLM_TORCHAX_ENABLED:
+        if VLLM_TORCHAX_ENABLED:
             self.kv_caches_dict = kv_caches
 
         # Profile with multimodal encoder & encoder cache.
