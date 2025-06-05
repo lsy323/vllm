@@ -18,7 +18,10 @@ import torch_xla.core.xla_model as xm
 import torch_xla.debug.profiler as xp
 import torch_xla.runtime as xr
 
-from vllm.compilation.torchax_wrapper import with_torchax_global
+try:
+    from tpu_commons.models.torchax.torchax_wrapper import with_torchax_global
+except ImportError:
+    from vllm.compilation.torchax_wrapper import with_torchax_global
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -294,11 +297,3 @@ class TPUWorker:
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size)
-
-
-try:
-    from tpu_commons.worker import TPUWorker as TPUCommonsWorker
-    TPUWorker = TPUCommonsWorker  # type: ignore
-except ImportError:
-    logger.info("tpu_commons not found, using vLLM's TPUWorker.")
-    pass

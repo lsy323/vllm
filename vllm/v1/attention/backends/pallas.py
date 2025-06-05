@@ -20,7 +20,11 @@ VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
 
 if VLLM_TORCHAX_ENABLED:
     # Register custom op dispatcher.
-    from vllm.compilation.torchax_wrapper import ragged_paged_attention
+    try:
+        from tpu_commons.models.torchax.torchax_wrapper import (
+            ragged_paged_attention)
+    except ImportError:
+        from vllm.compilation.torchax_wrapper import ragged_paged_attention
 
 logger = init_logger(__name__)
 

@@ -20,9 +20,14 @@ import vllm.envs as envs
 VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
 VLLM_TORCHAX_EAGER = os.environ.get('VLLM_TORCHAX_EAGER', '0') == '1'
 if VLLM_TORCHAX_ENABLED:
-    import torchax
     import jax
     import jax.numpy as jnp
+    import torchax
+    try:
+        from tpu_commons.models.torchax.torchax_wrapper import (
+            wrap_model, wrap_model_func)
+    except ImportError:
+        from vllm.compilation.torchax_wrapper import wrap_model, wrap_model_func
 
 from torch.utils import _pytree as pytree
 
@@ -34,15 +39,26 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.tpu import TPUModelLoader
+
+try:
+    from tpu_commons.models.torchax.tpu import TPUModelLoader
+except ImportError:
+    from vllm.model_executor.model_loader.tpu import TPUModelLoader
+
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargs,
                                     PlaceholderRange)
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.sequence import IntermediateTensors
 from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available
-from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
-                                               PallasMetadata)
+
+try:
+    from tpu_commons.attention.backends.pallas_torchax import (
+        PallasAttentionBackend, PallasMetadata)
+except ImportError:
+    from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
+                                                   PallasMetadata)
+
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec,
@@ -1057,7 +1073,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 torch.Tensor, lambda x: x.to('jax'), self.params_and_buffers)
 
             # Create a function for model.forward
-            from vllm.compilation.torchax_wrapper import wrap_model
             static_forward_context = \
                 self.vllm_config.compilation_config.static_forward_context
             wrapped_model_forward = wrap_model(
@@ -1068,7 +1083,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             self.model_func = wrapped_model_forward
 
             # Create a function for model.compute_logits
-            from vllm.compilation.torchax_wrapper import wrap_model_func
             self.compute_logits_func = wrap_model_func(model, "compute_logits")
 
             torchax.disable_globally()
