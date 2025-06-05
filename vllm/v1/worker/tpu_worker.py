@@ -297,3 +297,12 @@ class TPUWorker:
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size)
+
+
+try:
+    from tpu_commons.worker import TPUWorker as TPUCommonsWorker
+    logger.info("Use tpu_commons TPUWorker.")
+    TPUWorker = TPUCommonsWorker  # type: ignore
+except ImportError:
+    logger.info("tpu_commons not found, using vLLM's TPUWorker.")
+    pass
