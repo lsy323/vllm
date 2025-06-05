@@ -22,6 +22,7 @@ try:
     from tpu_commons.models.torchax.torchax_wrapper import with_torchax_global
 except ImportError:
     from vllm.compilation.torchax_wrapper import with_torchax_global
+
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -33,7 +34,11 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
-from vllm.v1.worker.tpu_model_runner import TPUModelRunner
+
+try:
+    from tpu_commons.runner.tpu_torchax_runner import TPUModelRunner
+except ImportError:
+    from vllm.v1.worker.tpu_model_runner import TPUModelRunner
 
 logger = init_logger(__name__)
 
