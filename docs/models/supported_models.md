@@ -346,6 +346,7 @@ Specified using `--task generate`.
 | `MixtralForCausalLM`                              | Mixtral-8x7B, Mixtral-8x7B-Instruct                 | `mistralai/Mixtral-8x7B-v0.1`, `mistralai/Mixtral-8x7B-Instruct-v0.1`, `mistral-community/Mixtral-8x22B-v0.1`, etc.                                                          | ✅︎                     | ✅︎                          |
 | `MPTForCausalLM`                                  | MPT, MPT-Instruct, MPT-Chat, MPT-StoryWriter        | `mosaicml/mpt-7b`, `mosaicml/mpt-7b-storywriter`, `mosaicml/mpt-30b`, etc.                                                                                                   |                        | ✅︎                          |
 | `NemotronForCausalLM`                             | Nemotron-3, Nemotron-4, Minitron                    | `nvidia/Minitron-8B-Base`, `mgoin/Nemotron-4-340B-Base-hf-FP8`, etc.                                                                                                         | ✅︎                     | ✅︎                          |
+| `NemotronHForCausalLM`                            | Nemotron-H                                          | `nvidia/Nemotron-H-8B-Base-8K`, `nvidia/Nemotron-H-47B-Base-8K`, `nvidia/Nemotron-H-56B-Base-8K`, etc.                                                                       | ✅︎                     | ✅︎                          |
 | `OLMoForCausalLM`                                 | OLMo                                                | `allenai/OLMo-1B-hf`, `allenai/OLMo-7B-hf`, etc.                                                                                                                             |                        | ✅︎                          |
 | `OLMo2ForCausalLM`                                | OLMo2                                               | `allenai/OLMo-2-0425-1B`, etc.                                                                                                                                               |                        | ✅︎                          |
 | `OLMoEForCausalLM`                                | OLMoE                                               | `allenai/OLMoE-1B-7B-0924`, `allenai/OLMoE-1B-7B-0924-Instruct`, etc.                                                                                                        |                        | ✅︎                          |
@@ -378,7 +379,7 @@ Specified using `--task generate`.
 
 See [this page](./pooling_models.md) for more information on how to use pooling models.
 
-!!! warning
+!!! important
     Since some model architectures support both generative and pooling tasks,
     you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
 
@@ -386,18 +387,19 @@ See [this page](./pooling_models.md) for more information on how to use pooling 
 
 Specified using `--task embed`.
 
-| Architecture                                           | Models              | Example HF Models                                                                                                   | [LoRA][lora-adapter]   | [PP][distributed-serving]   |
-|--------------------------------------------------------|---------------------|---------------------------------------------------------------------------------------------------------------------|------------------------|-----------------------------|
-| `BertModel`                                            | BERT-based          | `BAAI/bge-base-en-v1.5`, `Snowflake/snowflake-arctic-embed-xs`, etc.                                                |                        |                             |
-| `Gemma2Model`                                          | Gemma 2-based       | `BAAI/bge-multilingual-gemma2`, etc.                                                                                | ✅︎                     |                             |
-| `GritLM`                                               | GritLM              | `parasail-ai/GritLM-7B-vllm`.                                                                                       | ✅︎                     | ✅︎                          |
-| `GteModel`                                             | Arctic-Embed-2.0-M  | `Snowflake/snowflake-arctic-embed-m-v2.0`.                                                                          | ︎                      |                             |
-| `GteNewModel`                                          | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-base`, etc.                                                                           | ︎                      | ︎                           |
-| `ModernBertModel`                                      | ModernBERT-based    | `Alibaba-NLP/gte-modernbert-base`, etc.                                                                             | ︎                      | ︎                           |
-| `NomicBertModel`                                       | Nomic BERT          | `nomic-ai/nomic-embed-text-v1`, `nomic-ai/nomic-embed-text-v2-moe`, `Snowflake/snowflake-arctic-embed-m-long`, etc. | ︎                      | ︎                           |
-| `LlamaModel`, `LlamaForCausalLM`, `MistralModel`, etc. | Llama-based         | `intfloat/e5-mistral-7b-instruct`, etc.                                                                             | ✅︎                     | ✅︎                          |
-| `Qwen2Model`, `Qwen2ForCausalLM`                       | Qwen2-based         | `ssmits/Qwen2-7B-Instruct-embed-base` (see note), `Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc.              | ✅︎                     | ✅︎                          |
-| `RobertaModel`, `RobertaForMaskedLM`                   | RoBERTa-based       | `sentence-transformers/all-roberta-large-v1`, etc.                                                                  |                        |                             |
+| Architecture                                           | Models              | Example HF Models                                                                                                   | [LoRA][lora-adapter] | [PP][distributed-serving] |
+|--------------------------------------------------------|---------------------|---------------------------------------------------------------------------------------------------------------------|----------------------|---------------------------|
+| `BertModel`                                            | BERT-based          | `BAAI/bge-base-en-v1.5`, `Snowflake/snowflake-arctic-embed-xs`, etc.                                                |                      |                           |
+| `Gemma2Model`                                          | Gemma 2-based       | `BAAI/bge-multilingual-gemma2`, etc.                                                                                | ✅︎                   |                           |
+| `GritLM`                                               | GritLM              | `parasail-ai/GritLM-7B-vllm`.                                                                                       | ✅︎                   | ✅︎                        |
+| `GteModel`                                             | Arctic-Embed-2.0-M  | `Snowflake/snowflake-arctic-embed-m-v2.0`.                                                                          | ︎                    |                           |
+| `GteNewModel`                                          | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-base`, etc.                                                                           | ︎                    | ︎                         |
+| `ModernBertModel`                                      | ModernBERT-based    | `Alibaba-NLP/gte-modernbert-base`, etc.                                                                             | ︎                    | ︎                         |
+| `NomicBertModel`                                       | Nomic BERT          | `nomic-ai/nomic-embed-text-v1`, `nomic-ai/nomic-embed-text-v2-moe`, `Snowflake/snowflake-arctic-embed-m-long`, etc. | ︎                    | ︎                         |
+| `LlamaModel`, `LlamaForCausalLM`, `MistralModel`, etc. | Llama-based         | `intfloat/e5-mistral-7b-instruct`, etc.                                                                             | ✅︎                   | ✅︎                        |
+| `Qwen2Model`, `Qwen2ForCausalLM`                       | Qwen2-based         | `ssmits/Qwen2-7B-Instruct-embed-base` (see note), `Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc.              | ✅︎                   | ✅︎                        |
+| `Qwen3Model`, `Qwen3ForCausalLM`                       | Qwen3-based         | `Qwen/Qwen3-Embedding-0.6B`, etc.                                                                                   | ✅︎                   | ✅︎                        |
+| `RobertaModel`, `RobertaForMaskedLM`                   | RoBERTa-based       | `sentence-transformers/all-roberta-large-v1`, etc.                                                                  |                      |                           |
 
 !!! note
     `ssmits/Qwen2-7B-Instruct-embed-base` has an improperly defined Sentence Transformers config.
@@ -430,7 +432,7 @@ Specified using `--task reward`.
 If your model is not in the above list, we will try to automatically convert the model using
 [as_reward_model][vllm.model_executor.models.adapters.as_reward_model]. By default, we return the hidden states of each token directly.
 
-!!! warning
+!!! important
     For process-supervised reward models such as `peiyi9979/math-shepherd-mistral-7b-prm`, the pooling config should be set explicitly,
     e.g.: `--override-pooler-config '{"pooling_type": "STEP", "step_tag_id": 123, "returned_token_ids": [456, 789]}'`.
 
@@ -449,12 +451,19 @@ If your model is not in the above list, we will try to automatically convert the
 
 Specified using `--task score`.
 
-| Architecture                          | Models            | Example HF Models                            |
-|---------------------------------------|-------------------|----------------------------------------------|
-| `BertForSequenceClassification`       | BERT-based        | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc. |
-| `RobertaForSequenceClassification`    | RoBERTa-based     | `cross-encoder/quora-roberta-base`, etc.     |
-| `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc.              |
+| Architecture                          | Models            | Example HF Models                                                                    |
+|---------------------------------------|-------------------|--------------------------------------------------------------------------------------|
+| `BertForSequenceClassification`       | BERT-based        | `cross-encoder/ms-marco-MiniLM-L-6-v2`, etc.                                         |
+| `Qwen3ForSequenceClassification`      | Qwen3-based       | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B` (see note), etc. |
+| `RobertaForSequenceClassification`    | RoBERTa-based     | `cross-encoder/quora-roberta-base`, etc.                                             |
+| `XLMRobertaForSequenceClassification` | XLM-RoBERTa-based | `BAAI/bge-reranker-v2-m3`, etc.                                                      |
 
+!!! note
+    Load the official original `Qwen3 Reranker` by using the following command. More information can be found at: <gh-file:examples/offline_inference/qwen3_reranker.py>.
+
+    ```bash
+    vllm serve Qwen/Qwen3-Reranker-0.6B --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
+    ```
 [](){ #supported-mm-models }
 
 ## List of Multimodal Language Models
@@ -476,7 +485,7 @@ On the other hand, modalities separated by `/` are mutually exclusive.
 
 See [this page][multimodal-inputs] on how to pass multi-modal inputs to the model.
 
-!!! warning
+!!! important
     **To enable multiple multi-modal items per text prompt in vLLM V0**, you have to set `limit_mm_per_prompt` (offline inference)
     or `--limit-mm-per-prompt` (online serving). For example, to enable passing up to 4 images per text prompt:
 
@@ -631,7 +640,7 @@ Specified using `--task generate`.
 
 See [this page](./pooling_models.md) for more information on how to use pooling models.
 
-!!! warning
+!!! important
     Since some model architectures support both generative and pooling tasks,
     you should explicitly specify the task type to ensure that the model is used in pooling mode instead of generative mode.
 
