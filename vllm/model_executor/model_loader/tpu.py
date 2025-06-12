@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 import torch_xla.core.xla_model as xm
 import torch_xla.distributed.spmd as xs
-import torchax
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed.tpu_distributed_utils import get_fqn, shard_model
@@ -76,13 +75,17 @@ class TPUModelLoader(DefaultModelLoader):
             shard_model(model, mesh)
         else:
             # TODO: use torchax.enable_globally()
-            with torchax.default_env():
-                model = model.to('jax')
+            shard_model(model, mesh)
+            # Cannot use `to.('jax')`, need to use device_put to replicate the
+            # weight/buffer that are not sharded.
+            # with torchax.default_env():
+            #     model = model.to('jax')
         counter_after_partition = time.perf_counter()
         logger.info("Partition model took %.2f seconds",
                     counter_after_partition - counter_before_partition)
 
         if VLLM_TORCHAX_ENABLED:
+            self._check_model_is_loaded_torchax(mesh, model)
             # If torchax is enabled, we return the model directly.
             # The model is already partitioned and compiled.
             return model
@@ -97,6 +100,19 @@ class TPUModelLoader(DefaultModelLoader):
             model.language_model.model = \
                 torch.compile(model.language_model.model, backend="openxla")
         return model
+
+    def _check_model_is_loaded_torchax(self, mesh, model: nn.Module) -> None:
+        num_devices = mesh.size
+        # Check parameters
+        for name, param in model.named_parameters():
+            logger.info("weight %s: %s %s %s", name, param.shape, param.dtype,
+                        param)
+            jax_t = param.data.jax()
+            assert len(jax_t.global_shards) == num_devices
+
+        for name, buffer in model.named_buffers():
+            jax_t = buffer.jax()
+            assert len(jax_t.global_shards) == num_devices
 
     def _check_model_is_loaded(self, mesh: Optional[xs.Mesh],
                                model: nn.Module) -> None:

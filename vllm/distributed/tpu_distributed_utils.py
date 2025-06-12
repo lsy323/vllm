@@ -1,11 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
 from collections import OrderedDict
 from typing import Optional
 
+import jax
+import jax.numpy as jnp
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_xla.distributed.spmd as xs
+import torchax
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
@@ -14,6 +20,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 
 logger = init_logger(__name__)
+
+VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
 
 
 class XlaQKVParallelLinear(nn.Module):
@@ -108,34 +116,96 @@ class XlaQKVParallelLinear(nn.Module):
         return qkv_proj, output_bias
 
 
+def _create_torchax_tensor_with_sharding(weight_t, sharding):
+    if weight_t.dtype == torch.bfloat16:
+        jax_t = jnp.array(weight_t.to(torch.float32).numpy()).astype(
+            jnp.bfloat16)
+    else:
+        jax_t = jnp.array(weight_t.numpy())
+    jax_t = jax.device_put(jax_t, sharding)
+    torchax_t = torchax.tensor.Tensor(jax_t, torchax.default_env())
+    return torchax_t
+
+
 def partition_column_parallel_linear(layer: torch.nn.Module,
                                      mesh: xs.Mesh) -> torch.nn.Module:
     assert isinstance(layer, ColumnParallelLinear)
-    xs.mark_sharding(layer.weight, mesh, ('x', None))
-    logger.debug("Applied column-parallel sharding to %s", layer)
+    if VLLM_TORCHAX_ENABLED:
+
+        # weight_t = layer.weight.data
+        # if weight_t.dtype == torch.bfloat16:
+        #     jax_t = jnp.array(weight_t.to(torch.float32).numpy()).astype(jnp.bfloat16)
+        # else:
+        #     jax_t = jnp.array(weight_t.numpy())
+        sharding = NamedSharding(mesh, P('x', None))
+        # jax_t = jax.device_put(jax_t, sharding)
+        # torchax_t = torchax.tensor.Tensor(jax_t, torchax.default_env())
+        torchax_t = _create_torchax_tensor_with_sharding(
+            layer.weight.data, sharding)
+        layer.weight = Parameter(torchax_t,
+                                 requires_grad=layer.weight.requires_grad)
+        logger.info("Applied column-parallel sharding to %s", layer)
+    else:
+        xs.mark_sharding(layer.weight, mesh, ('x', None))
+        logger.info("Applied column-parallel sharding to %s", layer)
     return layer
 
 
 def partition_row_parallel_linear(layer: torch.nn.Module,
                                   mesh: xs.Mesh) -> torch.nn.Module:
     assert isinstance(layer, RowParallelLinear)
-    xs.mark_sharding(layer.weight, mesh, (None, 'x'))
-    logger.debug("Applied row-parallel sharding to %s", layer)
+    if VLLM_TORCHAX_ENABLED:
+        # weight_t = layer.weight.data
+        # if weight_t.dtype == torch.bfloat16:
+        #     jax_t = jnp.array(weight_t.to(torch.float32).numpy()).astype(jnp.bfloat16)
+        # else:
+        #     jax_t = jnp.array(weight_t.numpy())
+        sharding = NamedSharding(mesh, P(None, 'x'))
+        # jax_t = jax.device_put(jax_t, sharding)
+        # torchax_t = torchax.tensor.Tensor(jax_t, torchax.default_env())
+        torchax_t = _create_torchax_tensor_with_sharding(
+            layer.weight.data, sharding)
+        layer.weight = Parameter(torchax_t,
+                                 requires_grad=layer.weight.requires_grad)
+        logger.info("Applied row-parallel sharding to %s", layer)
+    else:
+        xs.mark_sharding(layer.weight, mesh, (None, 'x'))
+        logger.info("Applied row-parallel sharding to %s", layer)
     return layer
 
 
 def partition_qkv_parallel_linear(layer: torch.nn.Module,
                                   mesh: xs.Mesh) -> torch.nn.Module:
     assert isinstance(layer, QKVParallelLinear)
-    xla_layer = XlaQKVParallelLinear(layer, mesh)
-    logger.debug("Applied qkv parallel sharding to %s", layer)
+    if VLLM_TORCHAX_ENABLED:
+        xla_layer = layer
+    else:
+        xla_layer = XlaQKVParallelLinear(layer, mesh)
+        logger.info("Applied qkv parallel sharding to %s", layer)
     return xla_layer
 
 
+def replicate_weights_buffers(module: torch.nn.Module, mesh) -> None:
+    replicated_shardig = NamedSharding(mesh, P())
+    for name, param in module.named_parameters(recurse=False):
+        torchax_t = _create_torchax_tensor_with_sharding(
+            param.data, replicated_shardig)
+        torchax_param = Parameter(torchax_t, requires_grad=param.requires_grad)
+        setattr(module, name, torchax_param)
+
+    for name, buffer in module.named_buffers(recurse=False):
+        torchax_t = _create_torchax_tensor_with_sharding(
+            buffer, replicated_shardig)
+        # TODO: handle persistent buffer
+        setattr(module, name, torchax_t)
+
+
 MODULE_TYPE_TO_WRAPPING_FUNC = OrderedDict([
-    ("QKVParallelLinear", partition_qkv_parallel_linear),
+    # ("QKVParallelLinear", partition_qkv_parallel_linear),
     ("ColumnParallelLinear", partition_column_parallel_linear),
     ("RowParallelLinear", partition_row_parallel_linear),
+    # (ColumnParallelLinear, partition_column_parallel_linear),
+    # (RowParallelLinear, partition_row_parallel_linear),
 ])
 
 
@@ -155,8 +225,10 @@ def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
     """
 
     def _process_module(module, name=None, parent=None):
+        model_processed = False
         for module_type, wrapping_func in MODULE_TYPE_TO_WRAPPING_FUNC.items():
             if get_fqn(module) == module_type:
+                # if isinstance(module, module_type):
                 wrapped_module = wrapping_func(module, mesh)
 
                 assert parent is not None and name is not None, (
@@ -165,13 +237,24 @@ def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
                     # Wrapped module and module are different py object.
                     # The original module should be replaced by the
                     # wrapped_module.
-                    logger.debug("replace %s with %s", module, wrapped_module)
+                    logger.info("replace %s with %s", module, wrapped_module)
                     setattr(parent, name, wrapped_module)
 
                 module = wrapped_module
+                model_processed = True
                 break
+
+        # Replicate the weights and buffers if the module is not processed
+        if not model_processed and VLLM_TORCHAX_ENABLED:
+            replicate_weights_buffers(module, mesh)
 
         for child_name, child_module in list(module.named_children()):
             _process_module(child_module, child_name, module)
+
+    for name, tensor in model.named_parameters():
+        logger.info("weight %s: %s %s", name, tensor.shape, tensor.dtype)
+
+    for name, tensor in model.named_buffers():
+        logger.info("buffer %s: %s %s", name, tensor.shape, tensor.dtype)
 
     _process_module(model)

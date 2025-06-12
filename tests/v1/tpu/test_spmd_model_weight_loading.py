@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 import gc
+import os
 import tempfile
 
+import jax
 import numpy as np
 import pytest
 import torch_xla.distributed.spmd as xs
 import torch_xla.runtime as xr
+from jax.sharding import Mesh
 
 from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
@@ -37,11 +40,15 @@ MESH = None
 def _get_spmd_mesh():
     global MESH
     if MESH is None:
-        xr.use_spmd()
-        num_devices = xr.global_runtime_device_count()
-        mesh_shape = (num_devices, 1)
-        device_ids = np.array(range(num_devices))
-        MESH = xs.Mesh(device_ids, mesh_shape, ('x', 'y'))
+        if os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1':
+            devices = jax.devices()
+            MESH = Mesh(devices, axis_names=('x', ))
+        else:
+            xr.use_spmd()
+            num_devices = xr.global_runtime_device_count()
+            mesh_shape = (num_devices, 1)
+            device_ids = np.array(range(num_devices))
+            MESH = xs.Mesh(device_ids, mesh_shape, ('x', 'y'))
     return MESH
 
 
@@ -66,5 +73,6 @@ def test_tpu_model_loader(model):
     loader = TPUModelLoader(load_config=vllm_config.load_config)
     mesh = _get_spmd_mesh()
     model = loader.load_model(vllm_config, vllm_config.model_config, mesh)
+    print(model)
     del model
     gc.collect()
