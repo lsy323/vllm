@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
 from collections import OrderedDict
-from typing import Optional
+from typing import Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch_xla.distributed.spmd as xs
 import torchax
-from jax.sharding import NamedSharding
+from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from torch.nn.parameter import Parameter
 
@@ -22,6 +22,43 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 logger = init_logger(__name__)
 
 VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
+
+
+def create_torchax_tensor_with_partition_spec(
+        weight_t: torch.Tensor,
+        mesh: Optional[Union["xs.Mesh", Mesh]] = None,
+        partition_spec: Optional[Tuple] = None):
+    # Validate that if mesh is None, sharding must also be None
+    if mesh is None and partition_spec is not None:
+        raise ValueError("if mesh is None, sharding must also be None")
+
+    if VLLM_TORCHAX_ENABLED:
+        if mesh is None:
+            # Single chip case.
+            return weight_t.to('jax')
+
+        if weight_t.dtype == torch.bfloat16:
+            jax_t = jnp.array(weight_t.to(torch.float32).numpy()).astype(
+                jnp.bfloat16)
+        else:
+            jax_t = jnp.array(weight_t.numpy())
+
+        p = P()
+        if partition_spec is not None:
+            p = P(*partition_spec)
+        sharding = NamedSharding(mesh, p)
+
+        jax_t = jax.device_put(jax_t, sharding)
+
+        torchax_t = torchax.tensor.Tensor(jax_t, torchax.default_env())
+        return torchax_t
+    else:
+        if mesh is None:
+            return weight_t.to('xla')
+
+        # If mesh is provided, we use the XLA sharding
+        xs.mark_sharding(weight_t, mesh, sharding)
+        return weight_t
 
 
 class XlaQKVParallelLinear(nn.Module):
@@ -46,21 +83,28 @@ class XlaQKVParallelLinear(nn.Module):
             self._shard_weight(mesh)
 
     def _shard_weight(self, mesh: "xs.Mesh"):
-        self.q_weight = Parameter(self.q_weight.to('xla'), requires_grad=False)
-        self.k_weight = Parameter(self.k_weight.to('xla'), requires_grad=False)
-        self.v_weight = Parameter(self.v_weight.to('xla'), requires_grad=False)
-        xs.mark_sharding(self.q_weight, mesh, ('x', None))
-        xs.mark_sharding(self.k_weight, mesh, ('x', None))
-        xs.mark_sharding(self.v_weight, mesh, ('x', None))
+        self.q_weight = Parameter(create_torchax_tensor_with_partition_spec(
+            self.q_weight, mesh, ('x', None)),
+                                  requires_grad=False)
+        self.k_weight = Parameter(create_torchax_tensor_with_partition_spec(
+            self.k_weight, mesh, ('x', None)),
+                                  requires_grad=False)
+        self.v_weight = Parameter(create_torchax_tensor_with_partition_spec(
+            self.v_weight, mesh, ('x', None)),
+                                  requires_grad=False)
+
         if self.q_bias is not None:
             assert self.k_bias is not None and self.v_bias is not None, \
                 "QKVParallelLinear should have q, k, and v biases together."
-            self.q_bias = Parameter(self.q_bias.to('xla'), requires_grad=False)
-            xs.mark_sharding(self.q_bias, mesh, ('x', ))
-            self.k_bias = Parameter(self.k_bias.to('xla'), requires_grad=False)
-            xs.mark_sharding(self.k_bias, mesh, ('x', ))
-            self.v_bias = Parameter(self.v_bias.to('xla'), requires_grad=False)
-            xs.mark_sharding(self.v_bias, mesh, ('x', ))
+            self.q_bias = Parameter(create_torchax_tensor_with_partition_spec(
+                self.q_bias, mesh, ('x', )),
+                                    requires_grad=False)
+            self.k_bias = Parameter(create_torchax_tensor_with_partition_spec(
+                self.k_bias, mesh, ('x', )),
+                                    requires_grad=False)
+            self.v_bias = Parameter(create_torchax_tensor_with_partition_spec(
+                self.v_bias, mesh, ('x', )),
+                                    requires_grad=False)
 
     def _load_weights_from_qkv_linear(self, qkv_linear: nn.Module):
         q_proj_size, k_proj_size, _ = qkv_linear.output_sizes
@@ -116,17 +160,6 @@ class XlaQKVParallelLinear(nn.Module):
         return qkv_proj, output_bias
 
 
-def _create_torchax_tensor_with_sharding(weight_t, sharding):
-    if weight_t.dtype == torch.bfloat16:
-        jax_t = jnp.array(weight_t.to(torch.float32).numpy()).astype(
-            jnp.bfloat16)
-    else:
-        jax_t = jnp.array(weight_t.numpy())
-    jax_t = jax.device_put(jax_t, sharding)
-    torchax_t = torchax.tensor.Tensor(jax_t, torchax.default_env())
-    return torchax_t
-
-
 def partition_column_parallel_linear(layer: torch.nn.Module,
                                      mesh: xs.Mesh) -> torch.nn.Module:
     assert isinstance(layer, ColumnParallelLinear)
@@ -140,8 +173,8 @@ def partition_column_parallel_linear(layer: torch.nn.Module,
         sharding = NamedSharding(mesh, P('x', None))
         # jax_t = jax.device_put(jax_t, sharding)
         # torchax_t = torchax.tensor.Tensor(jax_t, torchax.default_env())
-        torchax_t = _create_torchax_tensor_with_sharding(
-            layer.weight.data, sharding)
+        torchax_t = create_torchax_tensor_with_partition_spec(
+            layer.weight.data, mesh, ('x', None))
         layer.weight = Parameter(torchax_t,
                                  requires_grad=layer.weight.requires_grad)
         logger.info("Applied column-parallel sharding to %s", layer)
@@ -163,8 +196,8 @@ def partition_row_parallel_linear(layer: torch.nn.Module,
         sharding = NamedSharding(mesh, P(None, 'x'))
         # jax_t = jax.device_put(jax_t, sharding)
         # torchax_t = torchax.tensor.Tensor(jax_t, torchax.default_env())
-        torchax_t = _create_torchax_tensor_with_sharding(
-            layer.weight.data, sharding)
+        torchax_t = create_torchax_tensor_with_partition_spec(
+            layer.weight.data, mesh, (None, 'x'))
         layer.weight = Parameter(torchax_t,
                                  requires_grad=layer.weight.requires_grad)
         logger.info("Applied row-parallel sharding to %s", layer)
@@ -188,14 +221,13 @@ def partition_qkv_parallel_linear(layer: torch.nn.Module,
 def replicate_weights_buffers(module: torch.nn.Module, mesh) -> None:
     replicated_shardig = NamedSharding(mesh, P())
     for name, param in module.named_parameters(recurse=False):
-        torchax_t = _create_torchax_tensor_with_sharding(
-            param.data, replicated_shardig)
+        torchax_t = create_torchax_tensor_with_partition_spec(
+            param.data, mesh, ())
         torchax_param = Parameter(torchax_t, requires_grad=param.requires_grad)
         setattr(module, name, torchax_param)
 
     for name, buffer in module.named_buffers(recurse=False):
-        torchax_t = _create_torchax_tensor_with_sharding(
-            buffer, replicated_shardig)
+        torchax_t = create_torchax_tensor_with_partition_spec(buffer, mesh, ())
         # TODO: handle persistent buffer
         setattr(module, name, torchax_t)
 
