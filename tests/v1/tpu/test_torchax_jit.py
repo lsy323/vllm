@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
 import functools
+import os
 import tempfile
 
+import jax
 import pytest
 import torch
+import torch_xla.distributed.spmd as xs
+import torch_xla.runtime as xr
 import torchax
+from jax.sharding import Mesh
 from torch.nn.utils import stateless as torch_stateless
 from torch.utils import _pytree as pytree
 from torchax.interop import extract_all_buffers, jax_jit
@@ -14,10 +19,29 @@ from vllm.attention.layer import Attention
 from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
+from vllm.distributed.tpu_distributed_utils import (
+    create_torchax_tensor_with_partition_spec)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.model_loader.tpu import TPUModelLoader
 from vllm.v1.attention.backends.pallas import PallasMetadata
+
+MESH = None
+
+
+def _get_spmd_mesh():
+    global MESH
+    if MESH is None:
+        if os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1':
+            devices = jax.devices()
+            MESH = Mesh(devices, axis_names=('x', ))
+        else:
+            xr.use_spmd()
+            num_devices = xr.global_runtime_device_count()
+            mesh_shape = (num_devices, 1)
+            device_ids = np.array(range(num_devices))
+            MESH = xs.Mesh(device_ids, mesh_shape, ('x', 'y'))
+    return MESH
 
 
 def _setup_environment(model):
@@ -74,29 +98,37 @@ def wrapped_module(m, vllm_config, static_forward_context):
 
 
 def _create_pallas_metadata_from_dict(dict):
-    dict = pytree.tree_map_only(torch.Tensor, lambda x: x.to('jax'), dict)
+    with torchax.default_env():
+        # dict = pytree.tree_map_only(torch.Tensor, lambda x: x.to('jax'), dict)
+        dict = pytree.tree_map_only(
+            torch.Tensor,
+            lambda x: create_torchax_tensor_with_partition_spec(x, MESH,
+                                                                ()), dict)
 
-    def _convert_one(d):
-        pallas_metadata = PallasMetadata(slot_mapping=d['slot_mapping'],
-                                         block_tables=d['block_tables'],
-                                         context_lens=d['context_lens'],
-                                         query_start_loc=d['query_start_loc'],
-                                         num_seqs=d['num_seqs'])
-        return pallas_metadata
+        def _convert_one(d):
+            pallas_metadata = PallasMetadata(
+                slot_mapping=d['slot_mapping'],
+                block_tables=d['block_tables'],
+                context_lens=d['context_lens'],
+                query_start_loc=d['query_start_loc'],
+                num_seqs=d['num_seqs'])
+            return pallas_metadata
 
-    res = {}
-    for key, value in dict.items():
-        res[key] = _convert_one(value)
-    return res
+        res = {}
+        for key, value in dict.items():
+            res[key] = _convert_one(value)
+        return res
 
 
 def _load_dump(path):
+    dump_dict = torch.load(path)
     with torchax.default_env():
-        dump_dict = torch.load(path)
         pallas_metadata = _create_pallas_metadata_from_dict(
             dump_dict["attn_metadata"])
-        input_ids = dump_dict['input_ids'].to('jax')
-        position_ids = dump_dict['position_ids'].to('jax')
+        input_ids = create_torchax_tensor_with_partition_spec(
+            dump_dict['input_ids'], MESH, ())
+        position_ids = create_torchax_tensor_with_partition_spec(
+            dump_dict['position_ids'], MESH, ())
         return pallas_metadata, input_ids, position_ids
 
 
@@ -123,14 +155,15 @@ def functional_call(model, method_name, params, buffers, *args, **kwargs):
 def test_tpu_model_loader(model):
     vllm_config = _setup_environment(model)
     loader = TPUModelLoader(load_config=vllm_config.load_config)
-    model = loader.load_model(None, vllm_config)
+    mesh = _get_spmd_mesh()
+    model = loader.load_model(vllm_config, vllm_config.model_config, mesh)
+
+    attn_metadata, input_ids, position_ids = \
+        _load_dump('/home/lsiyuan/torchax_dump/attn_metadata.pt')
 
     torchax.enable_globally()
     model = model.to('jax')
     print(model)
-
-    attn_metadata, input_ids, position_ids = \
-        _load_dump('/home/lsiyuan/torchax_dump/attn_metadata.pt')
 
     assert isinstance(model.model.layers[0].self_attn.attn, Attention)
 
@@ -150,8 +183,20 @@ def test_tpu_model_loader(model):
     # for key, value in kv_caches.items():
     #     kv_caches[key] = value[:1024]
     #     print(f"key {key}: value {kv_caches[key].shape}")
-    kv_caches = pytree.tree_map_only(torch.Tensor, lambda x: x.to('jax'),
-                                     kv_caches)
+
+    # This is for copy
+    # kv_caches = pytree.tree_map_only(torch.Tensor, lambda x: x.to('jax'),
+    #                                  kv_caches)
+
+    # This is for sharding
+    # kv_caches = pytree.tree_map_only(torch.Tensor, lambda x:
+    #                 create_torchax_tensor_with_partition_spec(x, mesh, (None, None, 'x', None)),
+    #                                   kv_caches)
+    # Duplicate since the dump is for qwen, and qwen has 4 heads
+    kv_caches = pytree.tree_map_only(
+        torch.Tensor,
+        lambda x: create_torchax_tensor_with_partition_spec(x, mesh,
+                                                            ()), kv_caches)
 
     # Simulate bind kv cache
     static_forward_context = \
@@ -159,11 +204,18 @@ def test_tpu_model_loader(model):
 
     wrapped_func = wrapped_module(model, vllm_config, static_forward_context)
     params, buffers = extract_all_buffers(model)
-    params, buffers = pytree.tree_map_only(torch.Tensor, lambda x: x.to('jax'),
-                                           (params, buffers))
+    # It's already placed on device by tpu loader.
+    # params, buffers = pytree.tree_map_only(torch.Tensor, lambda x: x.to('jax'),
+    #                                        (params, buffers))
     params_and_buffers = {**params, **buffers}
     input_args = (input_ids, position_ids)
     num_tokens = 9  # Not used?
+    for name, tensor in params_and_buffers.items():
+        if not isinstance(tensor, torchax.tensor.Tensor):
+            # print("name: {}, tensor: {}".format(name, tensor))
+            params_and_buffers[name] = \
+                create_torchax_tensor_with_partition_spec(tensor, mesh, ())
+    # breakpoint()
     hidden_states, new_kv_caches = wrapped_func(params_and_buffers, input_args,
                                                 kv_caches, attn_metadata,
                                                 num_tokens)

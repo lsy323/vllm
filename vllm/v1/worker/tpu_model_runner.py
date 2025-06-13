@@ -25,9 +25,13 @@ if VLLM_TORCHAX_ENABLED:
     import torchax
     try:
         from tpu_commons.models.torchax.torchax_wrapper import (
-            wrap_model, wrap_model_func)
+            get_cpu_tensor_from_torchax_tensor, wrap_model, wrap_model_func)
+
+        # TODO: import distributed util from tpu_commons
     except ImportError:
         from vllm.compilation.torchax_wrapper import wrap_model, wrap_model_func
+        from vllm.distributed.tpu_distributed_utils import (
+            create_torchax_tensor_with_partition_spec)
 
 from torch.utils import _pytree as pytree
 
@@ -151,12 +155,18 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.check_recompilation = envs.VLLM_XLA_CHECK_RECOMPILATION
 
         # SPMD Related
-        self.use_spmd = envs.VLLM_XLA_USE_SPMD
+        # self.use_spmd = envs.VLLM_XLA_USE_SPMD
+        self.use_spmd = True
+        self.mesh = None
         if self.use_spmd:
-            num_devices = xr.global_runtime_device_count()
-            mesh_shape = (num_devices, 1)
-            device_ids = np.array(range(num_devices))
-            self.mesh = xs.Mesh(device_ids, mesh_shape, ('x', 'y'))
+            if not VLLM_TORCHAX_ENABLED:
+                num_devices = xr.global_runtime_device_count()
+                mesh_shape = (num_devices, 1)
+                device_ids = np.array(range(num_devices))
+                self.mesh = xs.Mesh(device_ids, mesh_shape, ('x', 'y'))
+            else:
+                devices = jax.devices()
+                self.mesh = jax.sharding.Mesh(devices, axis_names=('x', ))
 
         self.enforce_eager = model_config.enforce_eager
 
@@ -545,8 +555,12 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         return kv_cache_spec
 
     def _create_torchax_array(self, torch_tensor):
-        return torchax.tensor.Tensor(jnp.array(torch_tensor.numpy()),
-                                     self.torchax_env)
+        if self.mesh is not None:
+            return create_torchax_tensor_with_partition_spec(
+                torch_tensor, self.mesh, ())
+        else:
+            return torchax.tensor.Tensor(jnp.array(torch_tensor.numpy()),
+                                         self.torchax_env)
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -961,7 +975,12 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             if tpu_sampling_metadata.logprobs else None
 
         # Remove padding on cpu and keep dynamic op outside of xla graph.
-        selected_token_ids = selected_token_ids.cpu()[:num_reqs]
+        if self.use_spmd and VLLM_TORCHAX_ENABLED:
+            selected_token_ids = get_cpu_tensor_from_torchax_tensor(
+                selected_token_ids)
+            selected_token_ids = selected_token_ids[:num_reqs]
+        else:
+            selected_token_ids = selected_token_ids.cpu()[:num_reqs]
         logprobs_lists = logprobs.tolists() \
             if tpu_sampling_metadata.logprobs else None
 
@@ -1077,8 +1096,21 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             # Need to explicitly move to jax device, because `model.to('jax')`
             # won't move tensors on python attributes to jax device.
             self.params_and_buffers = {**params, **buffers}
-            self.params_and_buffers = pytree.tree_map_only(
-                torch.Tensor, lambda x: x.to('jax'), self.params_and_buffers)
+            if self.mesh is not None:
+                # TODO: not needed anymore, since loader should move model to
+                # device already.
+                self.params_and_buffers = pytree.tree_map_only(
+                    torch.Tensor, lambda x: x.to('jax'),
+                    self.params_and_buffers)
+            else:
+                for name, tensor in self.params_and_buffers.items():
+                    # TODO: This should be moved to loader.
+                    if not isinstance(tensor, torchax.tensor.Tensor):
+                        # print("name: {}, tensor: {}".format(name, tensor))
+                        self.params_and_buffers[name] = \
+                            create_torchax_tensor_with_partition_spec(tensor,
+                                                                      self.mesh,
+                                                                      ())
 
             # Create a function for model.forward
             static_forward_context = \
@@ -1569,8 +1601,12 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
 
-                    tpu_kv_cache = torch.zeros(kv_cache_shape,
-                                               dtype=dtype).to(self.device)
+                    tpu_kv_cache = torch.zeros(kv_cache_shape, dtype=dtype)
+
+                    if self.use_spmd and VLLM_TORCHAX_ENABLED:
+                        # Use torchax tensor to support SPMD sharding.
+                        tpu_kv_cache = create_torchax_tensor_with_partition_spec(
+                            tpu_kv_cache, self.mesh, (None, None, 'x', None))
 
                     kv_caches[layer_name] = tpu_kv_cache
                 else:
@@ -1600,9 +1636,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.kv_caches_dict = kv_caches
         torchax.disable_globally()
 
-        if self.use_spmd:
+        if self.use_spmd and not VLLM_TORCHAX_ENABLED:
             # Shard KV Cache
             for cache in self.kv_caches:
+                cache = cache.to('xla')
                 xs.mark_sharding(cache, self.mesh, (None, 'x', None, None))
 
     def reset_dynamo_cache(self):

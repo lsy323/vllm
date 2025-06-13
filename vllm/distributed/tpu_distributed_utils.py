@@ -27,7 +27,7 @@ VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
 def create_torchax_tensor_with_partition_spec(
         weight_t: torch.Tensor,
         mesh: Optional[Union["xs.Mesh", Mesh]] = None,
-        partition_spec: Optional[Tuple] = None):
+        partition_spec: Optional[Tuple] = None) -> torch.Tensor:
     # Validate that if mesh is None, sharding must also be None
     if mesh is None and partition_spec is not None:
         raise ValueError("if mesh is None, sharding must also be None")
@@ -277,7 +277,7 @@ def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
                 break
 
         # Replicate the weights and buffers if the module is not processed
-        if not model_processed and VLLM_TORCHAX_ENABLED:
+        if not model_processed and VLLM_TORCHAX_ENABLED and mesh is not None:
             replicate_weights_buffers(module, mesh)
 
         for child_name, child_module in list(module.named_children()):
@@ -289,4 +289,5 @@ def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
     for name, tensor in model.named_buffers():
         logger.info("buffer %s: %s %s", name, tensor.shape, tensor.dtype)
 
+    assert mesh is not None, "Mesh must be provided for sharding."
     _process_module(model)

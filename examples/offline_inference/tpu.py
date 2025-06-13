@@ -37,9 +37,10 @@ def main():
         # Can only hardcode the number of chips for now.
         # calling xr.global_runtime_device_count() beforeing init SPMD env in
         # torch_xla will mess up the distributed env.
-        llm_args["tensor_parallel_size"] = 8
+        llm_args["tensor_parallel_size"] = 1
         # Use Llama, for num_kv_heads = 8.
         llm_args["model"] = "meta-llama/Llama-3.1-8B-Instruct"
+        llm_args["enforce_eager"] = True
 
     # Set `enforce_eager=True` to avoid ahead-of-time compilation.
     # In real workloads, `enforace_eager` should be `False`.
