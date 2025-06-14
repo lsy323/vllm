@@ -29,7 +29,8 @@ if VLLM_TORCHAX_ENABLED:
 
         # TODO: import distributed util from tpu_commons
     except ImportError:
-        from vllm.compilation.torchax_wrapper import wrap_model, wrap_model_func
+        from vllm.compilation.torchax_wrapper import (
+            get_cpu_tensor_from_torchax_tensor, wrap_model, wrap_model_func)
         from vllm.distributed.tpu_distributed_utils import (
             create_torchax_tensor_with_partition_spec)
 
@@ -1084,7 +1085,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             model = tpu_loader.load_model(
                 vllm_config=self.vllm_config,
                 model_config=self.vllm_config.model_config,
-                mesh=None)
+                mesh=self.mesh)
 
             # Extract all params and buffers for functional call.
             torchax.enable_globally()
@@ -1094,7 +1095,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             # Need to explicitly move to jax device, because `model.to('jax')`
             # won't move tensors on python attributes to jax device.
             self.params_and_buffers = {**params, **buffers}
-            if self.mesh is not None:
+            if self.mesh is None:
                 # TODO: not needed anymore, since loader should move model to
                 # device already.
                 self.params_and_buffers = pytree.tree_map_only(
@@ -1102,9 +1103,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                     self.params_and_buffers)
             else:
                 for name, tensor in self.params_and_buffers.items():
+                    logger.info("name: {}, tensor: {}".format(name, tensor))
                     # TODO: This should be moved to loader.
                     if not isinstance(tensor, torchax.tensor.Tensor):
-                        # print("name: {}, tensor: {}".format(name, tensor))
+                        logger.info("Replicate on all devices")
                         self.params_and_buffers[name] = \
                             create_torchax_tensor_with_partition_spec(tensor,
                                                                       self.mesh,
@@ -1171,26 +1173,26 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                         dtype=self.dtype,
                                         device=self.device)
         else:
-            input_ids = torch.zeros((num_tokens),
-                                    dtype=torch.int32).to(self.device)
+            input_ids = self._create_torchax_array(
+                torch.zeros((num_tokens), dtype=torch.int32))
             inputs_embeds = None
         actual_num_reqs = min(num_tokens, self.max_num_reqs)
-        position_ids = torch.zeros(num_tokens,
-                                   dtype=torch.int32).to(self.device)
-        slot_mapping = torch.zeros(num_tokens,
-                                   dtype=torch.int64).to(self.device)
-        block_tables = torch.zeros(
-            (self.max_num_reqs, self.block_table_cpu.shape[1]),
-            dtype=torch.int32).to(self.device)
+        position_ids = self._create_torchax_array(
+            torch.zeros(num_tokens, dtype=torch.int32))
+        slot_mapping = self._create_torchax_array(
+            torch.zeros(num_tokens, dtype=torch.int64))
+        block_tables = self._create_torchax_array(
+            torch.zeros((self.max_num_reqs, self.block_table_cpu.shape[1]),
+                        dtype=torch.int32))
         query_lens = [1] * self.max_num_reqs
-        query_start_loc = torch.cumsum(torch.tensor([0] + query_lens,
-                                                    dtype=torch.int32),
-                                       dim=0,
-                                       dtype=torch.int32).to(self.device)
-        context_lens = torch.ones((self.max_num_reqs, ),
-                                  dtype=torch.int32).to(self.device)
-        num_seqs = torch.tensor([actual_num_reqs],
-                                dtype=torch.int32).to(self.device)
+        query_start_loc = self._create_torchax_array(
+            torch.cumsum(torch.tensor([0] + query_lens, dtype=torch.int32),
+                         dim=0,
+                         dtype=torch.int32))
+        context_lens = self._create_torchax_array(
+            torch.ones((self.max_num_reqs, ), dtype=torch.int32))
+        num_seqs = self._create_torchax_array(
+            torch.tensor([actual_num_reqs], dtype=torch.int32))
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,

@@ -131,7 +131,10 @@ from jax._src.shard_map import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
-mesh = Mesh(jax.devices(), axis_names=('x', ))
+
+def get_mesh():
+    mesh = Mesh(jax.devices(), axis_names=('x', ))
+    return mesh
 
 
 @functools.partial(
@@ -169,7 +172,7 @@ def _ragged_paged_attention(
         ragged_paged_attention as ragged_paged_attention_kernel)
 
     @functools.partial(shard_map,
-                       mesh=mesh,
+                       mesh=get_mesh(),
                        in_specs=(P(None, 'x', None), P(None, None,
                                                        'x'), P(None),
                                  P(None, None), P(None), P(None)),

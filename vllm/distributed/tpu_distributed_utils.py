@@ -219,7 +219,7 @@ def partition_qkv_parallel_linear(layer: torch.nn.Module,
 
 
 def replicate_weights_buffers(module: torch.nn.Module, mesh) -> None:
-    replicated_shardig = NamedSharding(mesh, P())
+    logger.info("Replicating weights and buffers for module %s", module)
     for name, param in module.named_parameters(recurse=False):
         torchax_t = create_torchax_tensor_with_partition_spec(
             param.data, mesh, ())
@@ -260,6 +260,8 @@ def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
         model_processed = False
         for module_type, wrapping_func in MODULE_TYPE_TO_WRAPPING_FUNC.items():
             if get_fqn(module) == module_type:
+                logger.info("processing module %s with type %s", module,
+                            module_type)
                 # if isinstance(module, module_type):
                 wrapped_module = wrapping_func(module, mesh)
 
