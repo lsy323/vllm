@@ -210,11 +210,8 @@ def partition_row_parallel_linear(layer: torch.nn.Module,
 def partition_qkv_parallel_linear(layer: torch.nn.Module,
                                   mesh: xs.Mesh) -> torch.nn.Module:
     assert isinstance(layer, QKVParallelLinear)
-    if VLLM_TORCHAX_ENABLED:
-        xla_layer = layer
-    else:
-        xla_layer = XlaQKVParallelLinear(layer, mesh)
-        logger.info("Applied qkv parallel sharding to %s", layer)
+    xla_layer = XlaQKVParallelLinear(layer, mesh)
+    logger.info("Applied qkv parallel sharding to %s", layer)
     return xla_layer
 
 
@@ -233,7 +230,7 @@ def replicate_weights_buffers(module: torch.nn.Module, mesh) -> None:
 
 
 MODULE_TYPE_TO_WRAPPING_FUNC = OrderedDict([
-    # ("QKVParallelLinear", partition_qkv_parallel_linear),
+    ("QKVParallelLinear", partition_qkv_parallel_linear),
     ("ColumnParallelLinear", partition_column_parallel_linear),
     ("RowParallelLinear", partition_row_parallel_linear),
     # (ColumnParallelLinear, partition_column_parallel_linear),
