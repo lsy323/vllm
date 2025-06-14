@@ -285,11 +285,11 @@ def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
         for child_name, child_module in list(module.named_children()):
             _process_module(child_module, child_name, module)
 
-    for name, tensor in model.named_parameters():
-        logger.info("weight %s: %s %s", name, tensor.shape, tensor.dtype)
+    # for name, tensor in model.named_parameters():
+    #     logger.info("weight %s: %s %s", name, tensor.shape, tensor.dtype)
 
-    for name, tensor in model.named_buffers():
-        logger.info("buffer %s: %s %s", name, tensor.shape, tensor.dtype)
+    # for name, tensor in model.named_buffers():
+    #     logger.info("buffer %s: %s %s", name, tensor.shape, tensor.dtype)
 
     assert mesh is not None, "Mesh must be provided for sharding."
     _process_module(model)

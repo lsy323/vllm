@@ -1103,10 +1103,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                     self.params_and_buffers)
             else:
                 for name, tensor in self.params_and_buffers.items():
-                    logger.info("name: {}, tensor: {}".format(name, tensor))
+                    # logger.info("name: {}, tensor: {}".format(name, tensor))
                     # TODO: This should be moved to loader.
                     if not isinstance(tensor, torchax.tensor.Tensor):
-                        logger.info("Replicate on all devices")
+                        # logger.info("Replicate on all devices")
                         self.params_and_buffers[name] = \
                             create_torchax_tensor_with_partition_spec(tensor,
                                                                       self.mesh,
@@ -1286,7 +1286,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                         placeholders_ids[:items_size] = \
                             hf_config.image_token_index
 
-                        placeholders_ids = placeholders_ids.to(self.device)
+                        # placeholders_ids = placeholders_ids.to(self.device)
+                        placeholders_ids = \
+                            create_torchax_tensor_with_partition_spec(
+                                placeholders_ids, self.mesh, ()
+                            )
                         # Assign outputs or the graph will be cut short.
                         a, b = self._get_model_inputs(placeholders_ids,
                                                       [mm_embeds])
@@ -1299,7 +1303,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 placeholders_ids = torch.zeros(num_tokens,
                                                dtype=torch.int32,
                                                device="cpu")
-                placeholders_ids = placeholders_ids.to(self.device)
+                # placeholders_ids = placeholders_ids.to(self.device)
+                placeholders_ids = \
+                            create_torchax_tensor_with_partition_spec(
+                                placeholders_ids, self.mesh, ()
+                            )
                 a, b = self._get_model_inputs(placeholders_ids, [])
                 assert a is None
                 # xm.mark_step()
@@ -1379,13 +1387,18 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                                        device=self.device,
                                        dtype=self._hidden_states_dtype)
             dummy_require_struct_decoding = \
-                self.require_structured_out_cpu[:num_reqs].to(self.device)
+                create_torchax_tensor_with_partition_spec(
+                    self.require_structured_out_cpu[:num_reqs], self.mesh, ()
+                )
             dummy_grammar_bitmask = \
-                self.grammar_bitmask_cpu[:num_reqs].to(self.device)
+                create_torchax_tensor_with_partition_spec(
+                    self.grammar_bitmask_cpu[:num_reqs], self.mesh, ()
+                )
             # The first dimension of the above 3 dummy tensors cannot be
             # mark_dynamic because some operations in structured_decode require
             # them to be static.
-            arange = self.structured_decode_arange.to(self.device)
+            arange = create_torchax_tensor_with_partition_spec(
+                self.structured_decode_arange, self.mesh, ())
             self.structured_decode(dummy_require_struct_decoding,
                                    dummy_grammar_bitmask, dummy_logits, arange)
             logger.info("  -- num_seqs: %d", num_reqs)
@@ -1399,9 +1412,9 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             "Compiling sample_from_logits with different input shapes.")
         start = time.perf_counter()
         for num_reqs in self.num_reqs_paddings:
-            dummy_logits = torch.zeros((num_reqs, self.vocab_size),
-                                       device=self.device,
-                                       dtype=self._hidden_states_dtype)
+            dummy_logits = create_torchax_tensor_with_partition_spec(
+                torch.zeros((num_reqs, self.vocab_size),
+                            dtype=self._hidden_states_dtype), self.mesh, ())
             # The first dimension of dummy_logits cannot be mark_dynamic
             # because some operations in the sampler require it to be static.
             for all_greedy in [False, True]:
@@ -1429,11 +1442,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         logger.info("Compiling gather_logprobs with different input shapes.")
         start = time.perf_counter()
         for num_reqs in self.num_reqs_paddings:
-            dummy_logits = torch.zeros((num_reqs, self.vocab_size),
-                                       device=self.device,
-                                       dtype=self._hidden_states_dtype)
-            dummy_tokens = torch.zeros((num_reqs, 1),
-                                       dtype=torch.int64).to(self.device)
+            dummy_logits = create_torchax_tensor_with_partition_spec(
+                torch.zeros((num_reqs, self.vocab_size),
+                            dtype=self._hidden_states_dtype), self.mesh, ())
+            dummy_tokens = create_torchax_tensor_with_partition_spec(
+                torch.zeros((num_reqs, 1), dtype=torch.int64), self.mesh, ())
             with self.maybe_select_dummy_loras(
                     self.lora_config, np.array([num_reqs], dtype=np.int32)):
                 self.gather_logprobs(dummy_logits, dummy_tokens)
@@ -1672,9 +1685,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         Sample with xla-friendly function. This function is to be traced 
         separately from `forward` for lighter compilation overhead.
         """
-        if sampling_metadata.all_greedy:
+        if sampling_metadata.all_greedy or VLLM_TORCHAX_ENABLED:
             out_tokens = torch.argmax(logits, dim=-1, keepdim=True)
         else:
+            # TODO: fix non-greedy sampler with torchax.
             out_tokens = self.sampler(logits,
                                       sampling_metadata).sampled_token_ids
         return out_tokens
@@ -1754,9 +1768,15 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # the requests that need structured output.
         struct_out_indices = torch.tensor(struct_out_indices, dtype=torch.long)
         self.require_structured_out_cpu[struct_out_indices] = True
-        return self.require_structured_out_cpu[:num_reqs].to(logits.device), \
-            self.grammar_bitmask_cpu[:num_reqs].to(logits.device), \
-            self.structured_decode_arange.to(logits.device)
+        # return self.require_structured_out_cpu[:num_reqs].to(logits.device), \
+        #     self.grammar_bitmask_cpu[:num_reqs].to(logits.device), \
+        #     self.structured_decode_arange.to(logits.device)
+        return create_torchax_tensor_with_partition_spec(
+            self.require_structured_out_cpu[:num_reqs], self.mesh, ()), \
+                create_torchax_tensor_with_partition_spec(
+            self.grammar_bitmask_cpu[:num_reqs], self.mesh, ()), \
+                create_torchax_tensor_with_partition_spec(
+            self.structured_decode_arange, self.mesh, ())
 
     def _get_mm_dummy_batch(self, modality: str,
                             batch_size: int) -> BatchedTensorInputs:
