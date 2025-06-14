@@ -232,6 +232,7 @@ def replicate_weights_buffers(module: torch.nn.Module, mesh) -> None:
 MODULE_TYPE_TO_WRAPPING_FUNC = OrderedDict([
     ("QKVParallelLinear", partition_qkv_parallel_linear),
     ("ColumnParallelLinear", partition_column_parallel_linear),
+    ("MergedColumnParallelLinear", partition_column_parallel_linear),
     ("RowParallelLinear", partition_row_parallel_linear),
     # (ColumnParallelLinear, partition_column_parallel_linear),
     # (RowParallelLinear, partition_row_parallel_linear),
