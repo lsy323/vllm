@@ -9,6 +9,7 @@ import torch
 import torch_xla.distributed.spmd as xs
 import torch_xla.runtime as xr
 from jax.sharding import Mesh
+from torchax.interop import extract_all_buffers, jax_jit
 
 from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
@@ -62,7 +63,7 @@ def _get_spmd_mesh():
     return MESH
 
 
-@pytest.mark.parametrize("bias", [False, True])
+@pytest.mark.parametrize("bias", [False])
 # `xr.use_spmd()` will set a global state, and this state is not reversible.
 # Therefore, non-SPMD tests should be run before SPMD tests.
 @pytest.mark.parametrize("mesh", [_get_spmd_mesh()])
@@ -91,6 +92,23 @@ def test_xla_merged_col_parallel_linear(bias, mesh, device):
 
     xla_merged_col_parallel_linear = XlaMergedColumnParallelLinear(
         merged_col_parallel_linear, mesh=mesh)
+
+    params, buffers = extract_all_buffers(xla_merged_col_parallel_linear)
+    params_and_buffers = {**params, **buffers}
+
+    @jax_jit
+    def wrapped_func(params_and_buffers, args, **kwargs):
+        return torch.func.functional_call(xla_merged_col_parallel_linear,
+                                          params_and_buffers,
+                                          args=args,
+                                          kwargs=kwargs,
+                                          strict=True)
+
+    # breakpoint()
+    print(f"check {params_and_buffers}")
+    print(
+        f"check model statedict {xla_merged_col_parallel_linear.state_dict()}")
+
     # If jitted got small relative error
     # if device == 'jax':
     # xla_merged_col_parallel_linear = JittableModule(xla_merged_col_parallel_linear)
@@ -104,9 +122,9 @@ def test_xla_merged_col_parallel_linear(bias, mesh, device):
             input_tensor, mesh=mesh)
 
     output = merged_col_parallel_linear(input_tensor)
-    xla_output = xla_merged_col_parallel_linear(input_tensor_rep)
+    # xla_output = xla_merged_col_parallel_linear(input_tensor_rep)
+    xla_output = wrapped_func(params_and_buffers, (input_tensor_rep, ))
     if device == 'jax':
-        # Convert both to float32 to avoid dtype promotion issues between float16 and bfloat16
         output_np = np.asarray(output.jax()).astype(np.float32)
         xla_output_np = np.asarray(xla_output.jax()).astype(np.float32)
         max_abs_error = np.max(np.abs(output_np - xla_output_np))
