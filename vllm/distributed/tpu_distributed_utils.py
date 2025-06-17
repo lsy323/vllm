@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
 from collections import OrderedDict
-from typing import Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -16,6 +16,7 @@ from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 
@@ -160,6 +161,92 @@ class XlaQKVParallelLinear(nn.Module):
         return qkv_proj, output_bias
 
 
+class XlaMergedColumnParallelLinear(nn.Module):
+
+    def __init__(self,
+                 merged_col_parallel_linear: nn.Module,
+                 mesh: Optional["xs.Mesh"] = None):
+        super().__init__()
+        assert isinstance(merged_col_parallel_linear,
+                          MergedColumnParallelLinear)
+        self.output_sizes = merged_col_parallel_linear.output_sizes
+        self.skip_bias_add = merged_col_parallel_linear.skip_bias_add
+        self.return_bias = merged_col_parallel_linear.return_bias
+        assert merged_col_parallel_linear.tp_size == 1, "TP > 1 is only supported under SPMD."
+
+        self.weight_list: List[Parameter] = []
+        self.bias_list: Optional[List[Parameter]] = None
+        self._load_weights_from_qkv_linear(merged_col_parallel_linear)
+        if mesh is not None:
+            self._shard_weight(mesh)
+
+    def _shard_weight(self, mesh: "xs.Mesh"):
+        # Shard all weights in the weight_list
+        for i, weight in enumerate(self.weight_list):
+            sharded_weight = Parameter(
+                create_torchax_tensor_with_partition_spec(
+                    weight, mesh, ('x', None)),
+                requires_grad=weight.requires_grad)
+            setattr(self, f"weight_{i}", sharded_weight)
+            self.weight_list[i] = sharded_weight
+
+        # Shard all biases in the bias_list if they exist
+        if self.bias_list and any(bias is not None for bias in self.bias_list):
+            for i, bias in enumerate(self.bias_list):
+                if bias is not None:
+                    sharded_bias = Parameter(
+                        create_torchax_tensor_with_partition_spec(
+                            bias, mesh, ('x', )),
+                        requires_grad=bias.requires_grad)
+                    setattr(self, f"bias_{i}", sharded_bias)
+                    self.bias_list[i] = sharded_bias
+
+    def _load_weights_from_qkv_linear(self,
+                                      merged_col_parallel_linear: nn.Module):
+        output_sizes = merged_col_parallel_linear.output_sizes
+        concat_weight = merged_col_parallel_linear.weight.data.cpu()
+        concat_bias = None
+        if merged_col_parallel_linear.bias is not None:
+            concat_bias = merged_col_parallel_linear.bias.data.cpu()
+            self.bias_list = []
+        start_offset = 0
+        for i, size in enumerate(output_sizes):
+            weight = Parameter(concat_weight[start_offset:start_offset + size],
+                               requires_grad=False)
+            self.register_parameter(f"weight_{i}", weight)
+            self.weight_list.append(weight)
+
+            if concat_bias is not None:
+                bias = Parameter(concat_bias[start_offset:start_offset + size],
+                                 requires_grad=False)
+                self.register_parameter(f"bias_{i}", bias)
+                self.bias_list.append(bias)
+            else:
+                self.register_parameter(f"bias_{i}", None)
+
+            start_offset += size
+
+    def forward(self, input):
+        # Apply linear transformations for each weight/bias pair
+        outputs = []
+        for i, weight in enumerate(self.weight_list):
+            bias = self.bias_list[i] if (self.bias_list
+                                         and not self.skip_bias_add) else None
+            output = F.linear(input, weight, bias)
+            outputs.append(output)
+
+        # Concatenate all outputs
+        merged_output = torch.cat(outputs, dim=-1)
+
+        # Handle bias return if needed
+        if self.return_bias and self.bias_list and self.skip_bias_add:
+            output_bias = torch.cat(
+                [bias for bias in self.bias_list if bias is not None], dim=-1)
+            return merged_output, output_bias
+
+        return merged_output
+
+
 def partition_column_parallel_linear(layer: torch.nn.Module,
                                      mesh: xs.Mesh) -> torch.nn.Module:
     assert isinstance(layer, ColumnParallelLinear)
@@ -215,6 +302,14 @@ def partition_qkv_parallel_linear(layer: torch.nn.Module,
     return xla_layer
 
 
+def partition_merged_col_parallel_linear(layer: torch.nn.Module,
+                                         mesh: xs.Mesh) -> torch.nn.Module:
+    assert isinstance(layer, MergedColumnParallelLinear)
+    xla_layer = XlaMergedColumnParallelLinear(layer, mesh)
+    logger.info("Applied merged column parallel sharding to %s", layer)
+    return xla_layer
+
+
 def replicate_weights_buffers(module: torch.nn.Module, mesh) -> None:
     logger.info("Replicating weights and buffers for module %s", module)
     for name, param in module.named_parameters(recurse=False):
@@ -231,7 +326,7 @@ def replicate_weights_buffers(module: torch.nn.Module, mesh) -> None:
 
 MODULE_TYPE_TO_WRAPPING_FUNC = OrderedDict([
     ("QKVParallelLinear", partition_qkv_parallel_linear),
-    ("ColumnParallelLinear", partition_column_parallel_linear),
+    ("ColumnParallelLinear", partition_merged_col_parallel_linear),
     ("MergedColumnParallelLinear", partition_column_parallel_linear),
     ("RowParallelLinear", partition_row_parallel_linear),
     # (ColumnParallelLinear, partition_column_parallel_linear),
