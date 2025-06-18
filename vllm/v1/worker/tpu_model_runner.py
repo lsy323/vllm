@@ -696,8 +696,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             self.set_active_loras(self.input_batch,
                                   padded_num_scheduled_tokens_per_req)
 
-        num_seqs = torchax.tensor.Tensor(
-            jnp.array([num_reqs], dtype=jnp.int32), self.torchax_env)
+        # num_seqs = torchax.tensor.Tensor(
+        #     jnp.array([num_reqs], dtype=jnp.int32), self.torchax_env)
+        num_seqs = self._create_torchax_array(
+            torch.tensor([num_reqs], dtype=torch.int32))
         attn_metadata = PallasMetadata(
             slot_mapping=slot_mapping,
             block_tables=block_tables,
