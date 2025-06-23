@@ -128,7 +128,7 @@ def _ragged_paged_attention_tmp(
 
 
 from jax._src.shard_map import shard_map
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 

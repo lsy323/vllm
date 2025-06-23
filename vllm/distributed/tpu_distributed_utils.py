@@ -38,11 +38,13 @@ def create_torchax_tensor_with_partition_spec(
             # Single chip case.
             return weight_t.to('jax')
 
-        if weight_t.dtype == torch.bfloat16:
-            jax_t = jnp.array(weight_t.to(torch.float32).numpy()).astype(
-                jnp.bfloat16)
-        else:
-            jax_t = jnp.array(weight_t.numpy())
+        cpu_device = jax.devices("cpu")[0]
+        with jax.default_device(cpu_device):
+            if weight_t.dtype == torch.bfloat16:
+                jax_t = jnp.array(weight_t.to(torch.float32).numpy()).astype(
+                    jnp.bfloat16)
+            else:
+                jax_t = jnp.array(weight_t.numpy())
 
         p = P()
         if partition_spec is not None:
@@ -305,6 +307,11 @@ def partition_row_parallel_linear(layer: torch.nn.Module,
                                   mesh: xs.Mesh) -> torch.nn.Module:
     assert isinstance(layer, RowParallelLinear)
     if VLLM_TORCHAX_ENABLED:
+        def shard_output_hook(module, input, output):
+            sharding = NamedSharding(mesh, P('x', None))
+            new_output = output[0].apply_jax(jax.lax.with_sharding_constraint,
+                                             sharding)
+            return (new_output, output[1])
         # weight_t = layer.weight.data
         # if weight_t.dtype == torch.bfloat16:
         #     jax_t = jnp.array(weight_t.to(torch.float32).numpy()).astype(jnp.bfloat16)
@@ -317,6 +324,7 @@ def partition_row_parallel_linear(layer: torch.nn.Module,
             layer.weight.data, mesh, (None, 'x'))
         layer.weight = Parameter(torchax_t,
                                  requires_grad=layer.weight.requires_grad)
+        # layer.register_forward_hook(shard_output_hook)
         logger.info("Applied row-parallel sharding to %s", layer)
     else:
         xs.mark_sharding(layer.weight, mesh, (None, 'x'))

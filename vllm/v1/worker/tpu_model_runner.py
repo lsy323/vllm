@@ -553,10 +553,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         return kv_cache_spec
 
-    def _create_torchax_array(self, torch_tensor):
+    def _create_torchax_array(self, torch_tensor, partition_spec=()):
         if self.mesh is not None:
             return create_torchax_tensor_with_partition_spec(
-                torch_tensor, self.mesh, ())
+                torch_tensor, self.mesh, partition_spec)
         else:
             return torchax.tensor.Tensor(jnp.array(torch_tensor.numpy()),
                                          self.torchax_env)
@@ -656,8 +656,10 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         #                                     padded_total_num_scheduled_tokens].to(
         #                                         self.device)
 
+        # Do seq parallel
         self.input_ids = self._create_torchax_array(
-            self.input_ids_cpu[:padded_total_num_scheduled_tokens])
+            self.input_ids_cpu[:padded_total_num_scheduled_tokens],
+            partition_spec=('x',))
         # self.position_ids = self.positions_cpu[:
         #                                        padded_total_num_scheduled_tokens].to(
         #                                            self.device)
