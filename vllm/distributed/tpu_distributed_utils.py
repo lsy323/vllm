@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import os
 from collections import OrderedDict
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -28,12 +28,13 @@ VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
 def create_torchax_tensor_with_partition_spec(
         weight_t: torch.Tensor,
         mesh: Optional[Union["xs.Mesh", Mesh]] = None,
-        partition_spec: Optional[Tuple] = None) -> torch.Tensor:
+        partition_spec: Optional[tuple] = None) -> torch.Tensor:
     assert VLLM_TORCHAX_ENABLED, \
         "It's expected that VLLM_TORCHAX_ENABLED is True."
     # Validate that if mesh is None, sharding must also be None
     if mesh is None and (partition_spec is not None and partition_spec != ()):
-        raise ValueError("if mesh is None, sharding must also be None")
+        raise ValueError(
+            "If mesh is None, partition_spec must also be None or empty")
 
     if mesh is None:
         # Single chip case.
@@ -48,10 +49,8 @@ def create_torchax_tensor_with_partition_spec(
         else:
             jax_t = jnp.array(weight_t.numpy())
 
-    p = P()
-    if partition_spec is not None:
-        p = P(*partition_spec)
-    sharding = NamedSharding(mesh, p)
+    partition_spec = partition_spec or ()
+    sharding = NamedSharding(mesh, P(*partition_spec))
 
     jax_t = jax.device_put(jax_t, sharding)
 
@@ -68,7 +67,8 @@ class XlaQKVParallelLinear(nn.Module):
         assert isinstance(qkv_linear, QKVParallelLinear)
         self.skip_bias_add = qkv_linear.skip_bias_add
         self.return_bias = qkv_linear.return_bias
-        assert qkv_linear.tp_size == 1, "TP > 1 is only supported under SPMD."
+        assert qkv_linear.tp_size == 1, (
+            "Tensor parallelism (TP) > 1 is only supported under SPMD mode")
 
         self.q_weight: Parameter
         self.k_weight: Parameter
@@ -135,20 +135,23 @@ class XlaQKVParallelLinear(nn.Module):
             self.register_parameter("v_bias", None)
 
     def forward(self, input):
-        # Same forward functionality as QKVParallelLinear, but doing qkv porj
-        # separately.
+        """Forward pass performing QKV projection separately then concatenating.
+        
+        This maintains compatibility with QKVParallelLinear's output format
+        while enabling individual weight sharding for Q, K, and V projections.
+        """
         q_bias = self.q_bias if not self.skip_bias_add else None
         k_bias = self.k_bias if not self.skip_bias_add else None
         v_bias = self.v_bias if not self.skip_bias_add else None
         q_proj = F.linear(input, self.q_weight, q_bias)
         k_proj = F.linear(input, self.k_weight, k_bias)
         v_proj = F.linear(input, self.v_weight, v_bias)
-        # The q/k/v projections will be split outside of the QKVParallelLinear.
-        # Because we are replacing XlaQKVParallelLinear with the
-        # QKVParallelLinear, we need to concatenate q, k, and v projections to
-        # match the output shape of the QKVParallelLinear implementation even if
-        # it seems to be redundant.
-        # The concat and the following split will be noop, and should be
+        # The Q/K/V projections will be split outside of the QKVParallelLinear.
+        # Because we are replacing QKVParallelLinear with XlaQKVParallelLinear,
+        # we need to concatenate q, k, and v projections to match the output
+        # shape of the QKVParallelLinear implementation even if it seems
+        # redundant.
+        # The concat and the following split will be no-op, and should be
         # optimized away by the compiler.
         qkv_proj = torch.cat([q_proj, k_proj, v_proj], dim=-1)
         output_bias = torch.cat([q_bias, k_bias, v_bias], dim=-1) if \
@@ -170,9 +173,10 @@ class XlaMergedColumnParallelLinear(nn.Module):
         self.n_linear_layers = len(self.output_sizes)
         self.skip_bias_add = merged_col_parallel_linear.skip_bias_add
         self.return_bias = merged_col_parallel_linear.return_bias
-        assert merged_col_parallel_linear.tp_size == 1, "TP > 1 is only supported under SPMD."
+        assert merged_col_parallel_linear.tp_size == 1, (
+            "TP > 1 is only supported under SPMD.")
 
-        self._load_weights_from_qkv_linear(merged_col_parallel_linear)
+        self._load_weights_from_merged_linear(merged_col_parallel_linear)
         if mesh is not None:
             self._shard_weight(mesh)
 
@@ -195,8 +199,8 @@ class XlaMergedColumnParallelLinear(nn.Module):
                     requires_grad=bias.requires_grad)
                 setattr(self, f"bias_{i}", sharded_bias)
 
-    def _load_weights_from_qkv_linear(self,
-                                      merged_col_parallel_linear: nn.Module):
+    def _load_weights_from_merged_linear(
+            self, merged_col_parallel_linear: nn.Module):
         output_sizes = merged_col_parallel_linear.output_sizes
         concat_weight = merged_col_parallel_linear.weight.data.cpu()
         concat_bias = None
@@ -296,7 +300,8 @@ def partition_merged_col_parallel_linear(layer: torch.nn.Module,
     return xla_layer
 
 
-def replicate_weights_buffers(module: torch.nn.Module, mesh) -> None:
+def replicate_weights_buffers(module: torch.nn.Module,
+                              mesh: "xs.Mesh") -> None:
     logger.info("Replicating weights and buffers for module %s", module)
     for name, param in module.named_parameters(recurse=False):
         torchax_t = create_torchax_tensor_with_partition_spec(
@@ -326,7 +331,7 @@ MODULE_TYPE_TO_WRAPPING_FUNC = OrderedDict([
 ])
 
 
-def get_fqn(module):
+def get_fqn(module) -> str:
     # Get the fully qualified name of the module
     return module.__class__.__qualname__
 
