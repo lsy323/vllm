@@ -554,6 +554,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         return kv_cache_spec
 
     def _create_torchax_array(self, torch_tensor, partition_spec=()):
+        # TODO: Use `create_torchax_tensor_with_partition_spec` instead.
         if self.mesh is not None:
             return create_torchax_tensor_with_partition_spec(
                 torch_tensor, self.mesh, partition_spec)
@@ -608,8 +609,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
-        # logger.info(f"check self.input_batch.token_ids_cpu_tensor {self.input_batch.token_ids_cpu_tensor}")
-        # logger.info(f"check input_ids_cpu {self.input_ids_cpu[:total_num_scheduled_tokens]}")
         torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
                            0,
                            torch.from_numpy(token_indices),
@@ -652,37 +651,21 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.input_ids_cpu[
             total_num_scheduled_tokens:padded_total_num_scheduled_tokens] = 0
 
-        # self.input_ids = self.input_ids_cpu[:
-        #                                     padded_total_num_scheduled_tokens].to(
-        #                                         self.device)
-
-        # Do seq parallel
         self.input_ids = self._create_torchax_array(
             self.input_ids_cpu[:padded_total_num_scheduled_tokens])
-        # self.position_ids = self.positions_cpu[:
-        #                                        padded_total_num_scheduled_tokens].to(
-        #                                            self.device)
         self.position_ids = self._create_torchax_array(
             self.positions_cpu[:padded_total_num_scheduled_tokens])
         self.input_batch.block_table[0].slot_mapping_cpu[
             total_num_scheduled_tokens:] = _PAD_SLOT_ID
-        # slot_mapping = (
-        #     self.input_batch.block_table[0].
-        #     slot_mapping_cpu[:padded_total_num_scheduled_tokens].to(
-        #         self.device))
         slot_mapping = self._create_torchax_array(
             self.input_batch.block_table[0].
             slot_mapping_cpu[:padded_total_num_scheduled_tokens])
         block_tables = self.block_table_cpu[:self.max_num_reqs]
         block_tables[:num_reqs, :self.max_num_blocks_per_req] = (
             self.input_batch.block_table[0].get_cpu_tensor()[:num_reqs])
-        # block_tables = block_tables.to(self.device)
         block_tables = self._create_torchax_array(block_tables)
-        # query_start_loc = self.query_start_loc_cpu[:self.max_num_reqs + 1].to(
-        #     self.device)
         query_start_loc = self._create_torchax_array(
             self.query_start_loc_cpu[:self.max_num_reqs + 1])
-        # seq_lens = self.seq_lens_cpu[:self.max_num_reqs].to(self.device)
         seq_lens = self._create_torchax_array(
             self.seq_lens_cpu[:self.max_num_reqs])
 
@@ -697,8 +680,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             self.set_active_loras(self.input_batch,
                                   padded_num_scheduled_tokens_per_req)
 
-        # num_seqs = torchax.tensor.Tensor(
-        #     jnp.array([num_reqs], dtype=jnp.int32), self.torchax_env)
         num_seqs = self._create_torchax_array(
             torch.tensor([num_reqs], dtype=torch.int32))
         attn_metadata = PallasMetadata(
@@ -718,7 +699,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Indices at which we sample (positions of last token in the sequence).
         # Padded to avoid recompiling when `num_reqs` varies.
         logits_indices = self.query_start_loc_cpu[1:padded_num_reqs + 1] - 1
-        # logits_indices = logits_indices.to(self.device)
         logits_indices = self._create_torchax_array(logits_indices)
 
         if self.lora_config is not None:
@@ -900,7 +880,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> ModelRunnerOutput:
-        # torchax.enable_globally()
         # Update cached state
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
@@ -913,20 +892,11 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             mm_embeds = self._gather_mm_embeddings(scheduler_output)
         else:
             mm_embeds = []
-        # xm.mark_step()
         # Prepare inputs
-        # torchax.disable_globally()
-        # prepare_inputs_start = time.perf_counter()
         attn_metadata, logits_indices, padded_num_reqs = self._prepare_inputs(
             scheduler_output)
-        # prepare_inputs_end = time.perf_counter()
-        # logger.info(
-        #     f"Time spent on _prepare_inputs: {prepare_inputs_end - prepare_inputs_start:.6f} seconds"
-        # )
-        # torchax.enable_globally()
         input_ids, inputs_embeds = self._get_model_inputs(
             self.input_ids, mm_embeds)
-        # xm.mark_step()
         num_reqs = self.input_batch.num_reqs
         # Run the decoder
         if not VLLM_TORCHAX_EAGER:
@@ -1063,8 +1033,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         # Check there are no new graphs compiled - all the graphs should be
         # captured and compiled during warm up.
         self._verify_num_xla_graphs("execute_model")
-        # torchax.disable_globally()
-        # gc.collect()
         return model_runner_output
 
     def load_model(self) -> None:
@@ -1100,18 +1068,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             # Need to explicitly move to jax device, because `model.to('jax')`
             # won't move tensors on python attributes to jax device.
             self.params_and_buffers = {**params, **buffers}
-            # if self.mesh is None:
-            #     # TODO: not needed anymore, since loader should move model to
-            #     # device already.
-            #     self.params_and_buffers = pytree.tree_map_only(
-            #         torch.Tensor, lambda x: x.to('jax'),
-            #         self.params_and_buffers)
-            # else:
             for name, tensor in self.params_and_buffers.items():
-                # logger.info("name: {}, tensor: {}".format(name, tensor))
-                # TODO: This should be moved to loader.
                 if not isinstance(tensor, torchax.tensor.Tensor):
-                    # logger.info("Replicate on all devices")
                     self.params_and_buffers[name] = \
                         create_torchax_tensor_with_partition_spec(tensor,
                                                                     self.mesh,
@@ -1471,7 +1429,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         """
         Precompile all the subgraphs with possible input shapes.
         """
-        # torchax.enable_globally()
         # with self.torchax_env:
         with self.maybe_setup_dummy_loras(self.lora_config):
             self._precompile_mm_encoder()
@@ -1481,7 +1438,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             self._precompile_structured_decoding()
             self._precompile_sample_from_logits()
             self._precompile_gather_logprobs()
-        # torchax.disable_globally()
 
     def profile_run(
         self,

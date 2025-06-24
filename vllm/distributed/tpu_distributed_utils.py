@@ -29,39 +29,34 @@ def create_torchax_tensor_with_partition_spec(
         weight_t: torch.Tensor,
         mesh: Optional[Union["xs.Mesh", Mesh]] = None,
         partition_spec: Optional[Tuple] = None) -> torch.Tensor:
+    assert VLLM_TORCHAX_ENABLED, \
+        "It's expected that VLLM_TORCHAX_ENABLED is True."
     # Validate that if mesh is None, sharding must also be None
     if mesh is None and (partition_spec is not None and partition_spec != ()):
         raise ValueError("if mesh is None, sharding must also be None")
 
-    if VLLM_TORCHAX_ENABLED:
-        if mesh is None:
-            # Single chip case.
-            return weight_t.to('jax')
+    if mesh is None:
+        # Single chip case.
+        return weight_t.to('jax')
 
-        cpu_device = jax.devices("cpu")[0]
-        with jax.default_device(cpu_device):
-            if weight_t.dtype == torch.bfloat16:
-                jax_t = jnp.array(weight_t.to(torch.float32).numpy()).astype(
-                    jnp.bfloat16)
-            else:
-                jax_t = jnp.array(weight_t.numpy())
+    # Create CPU tensor first then move to jax device.
+    cpu_device = jax.devices("cpu")[0]
+    with jax.default_device(cpu_device):
+        if weight_t.dtype == torch.bfloat16:
+            jax_t = jnp.array(weight_t.to(torch.float32).numpy()).astype(
+                jnp.bfloat16)
+        else:
+            jax_t = jnp.array(weight_t.numpy())
 
-        p = P()
-        if partition_spec is not None:
-            p = P(*partition_spec)
-        sharding = NamedSharding(mesh, p)
+    p = P()
+    if partition_spec is not None:
+        p = P(*partition_spec)
+    sharding = NamedSharding(mesh, p)
 
-        jax_t = jax.device_put(jax_t, sharding)
+    jax_t = jax.device_put(jax_t, sharding)
 
-        torchax_t = torchax.tensor.Tensor(jax_t, torchax.default_env())
-        return torchax_t
-    else:
-        if mesh is None:
-            return weight_t.to('xla')
-
-        # If mesh is provided, we use the XLA sharding
-        xs.mark_sharding(weight_t, mesh, sharding)
-        return weight_t
+    torchax_t = torchax.tensor.Tensor(jax_t, torchax.default_env())
+    return torchax_t
 
 
 class XlaQKVParallelLinear(nn.Module):
@@ -177,38 +172,12 @@ class XlaMergedColumnParallelLinear(nn.Module):
         self.return_bias = merged_col_parallel_linear.return_bias
         assert merged_col_parallel_linear.tp_size == 1, "TP > 1 is only supported under SPMD."
 
-        # self.weight_0: Parameter
-        # self.weight_1: Parameter
-        # self.bias_0: Optional[Parameter]
-        # self.bias_1: Optional[Parameter]
-        # self.weight_list: ParameterList = ParameterList()
-        # self.bias_list: Optional[ParameterList] = None
         self._load_weights_from_qkv_linear(merged_col_parallel_linear)
         if mesh is not None:
             self._shard_weight(mesh)
 
     def _shard_weight(self, mesh: "xs.Mesh"):
         # Shard all weights in the weight_list
-        # self.weight_0 = Parameter(
-        #     create_torchax_tensor_with_partition_spec(
-        #         self.weight_0, mesh, ('x', None)),
-        #     requires_grad=self.weight_0.requires_grad)
-        # self.weight_1 = Parameter(
-        #     create_torchax_tensor_with_partition_spec(
-        #         self.weight_1, mesh, ('x', None)),
-        #     requires_grad=self.weight_1.requires_grad)
-
-        # if self.bias_0 is not None:
-        #     self.bias_0 = Parameter(
-        #         create_torchax_tensor_with_partition_spec(
-        #             self.bias_0, mesh, ('x', )),
-        #         requires_grad=self.bias_0.requires_grad)
-        # if self.bias_1 is not None:
-        #     self.bias_1 = Parameter(
-        #         create_torchax_tensor_with_partition_spec(
-        #             self.bias_1, mesh, ('x', )),
-        #         requires_grad=self.bias_1.requires_grad)
-
         for i in range(self.n_linear_layers):
             weight = getattr(self, f"weight_{i}")
             sharded_weight = Parameter(
@@ -254,11 +223,7 @@ class XlaMergedColumnParallelLinear(nn.Module):
         for i, _ in enumerate(self.output_sizes):
             output = F.linear(input, getattr(self, f"weight_{i}"),
                               getattr(self, f"bias_{i}"))
-            # output = F.linear(input, weight, bias)
             outputs.append(output)
-        # output_0 = F.linear(input, self.weight_0, None)
-        # output_1 = F.linear(input, self.weight_1, None)
-        # outputs = [output_0, output_1]
 
         # Concatenate all outputs
         merged_output = torch.cat(outputs, dim=-1)
@@ -272,8 +237,6 @@ class XlaMergedColumnParallelLinear(nn.Module):
                     for i, _ in enumerate(self.output_sizes)
                 ],
                                         dim=-1)
-            # if self.bias_0 is not None:
-            #     output_bias = torch.cat([self.bias_0, self.bias_1], dim=-1)
             return merged_output, output_bias
 
         return merged_output
@@ -283,15 +246,6 @@ def partition_column_parallel_linear(layer: torch.nn.Module,
                                      mesh: xs.Mesh) -> torch.nn.Module:
     assert isinstance(layer, ColumnParallelLinear)
     if VLLM_TORCHAX_ENABLED:
-
-        # weight_t = layer.weight.data
-        # if weight_t.dtype == torch.bfloat16:
-        #     jax_t = jnp.array(weight_t.to(torch.float32).numpy()).astype(jnp.bfloat16)
-        # else:
-        #     jax_t = jnp.array(weight_t.numpy())
-        sharding = NamedSharding(mesh, P('x', None))
-        # jax_t = jax.device_put(jax_t, sharding)
-        # torchax_t = torchax.tensor.Tensor(jax_t, torchax.default_env())
         torchax_t = create_torchax_tensor_with_partition_spec(
             layer.weight.data, mesh, ('x', None))
         layer.weight = Parameter(torchax_t,
@@ -314,14 +268,6 @@ def partition_row_parallel_linear(layer: torch.nn.Module,
                                              sharding)
             return (new_output, output[1])
 
-        # weight_t = layer.weight.data
-        # if weight_t.dtype == torch.bfloat16:
-        #     jax_t = jnp.array(weight_t.to(torch.float32).numpy()).astype(jnp.bfloat16)
-        # else:
-        #     jax_t = jnp.array(weight_t.numpy())
-        sharding = NamedSharding(mesh, P(None, 'x'))
-        # jax_t = jax.device_put(jax_t, sharding)
-        # torchax_t = torchax.tensor.Tensor(jax_t, torchax.default_env())
         torchax_t = create_torchax_tensor_with_partition_spec(
             layer.weight.data, mesh, (None, 'x'))
         layer.weight = Parameter(torchax_t,
@@ -377,8 +323,6 @@ MODULE_TYPE_TO_WRAPPING_FUNC = OrderedDict([
     ("ColumnParallelLinear", partition_column_parallel_linear),
     ("MergedColumnParallelLinear", partition_merged_col_parallel_linear),
     ("RowParallelLinear", partition_row_parallel_linear),
-    # (ColumnParallelLinear, partition_column_parallel_linear),
-    # (RowParallelLinear, partition_row_parallel_linear),
 ])
 
 
@@ -403,7 +347,6 @@ def shard_model(model: torch.nn.Module, mesh: "xs.Mesh") -> None:
             if get_fqn(module) == module_type:
                 logger.info("processing module %s with type %s", module,
                             module_type)
-                # if isinstance(module, module_type):
                 wrapped_module = wrapping_func(module, mesh)
 
                 assert parent is not None and name is not None, (

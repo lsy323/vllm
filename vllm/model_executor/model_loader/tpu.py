@@ -42,9 +42,6 @@ class TPUModelLoader(DefaultModelLoader):
             with target_device:
                 model = initialize_model(vllm_config=vllm_config)
 
-            logger.info(
-                "check rotary embedding device after init %s", model.model.
-                layers[1].self_attn.rotary_emb.cos_sin_cache.device)
             load_format = vllm_config.load_config.load_format
             if load_format != "dummy":
                 weights_to_load = {
@@ -72,22 +69,15 @@ class TPUModelLoader(DefaultModelLoader):
 
             process_weights_after_loading(model, model_config, target_device)
 
-        logger.info(
-            "check rotary embedding device after post processing %s",
-            model.model.layers[1].self_attn.rotary_emb.cos_sin_cache.device)
-
         counter_before_partition = time.perf_counter()
         model = model.eval()
         if not VLLM_TORCHAX_ENABLED:
             model = model.to('xla')
             shard_model(model, mesh)
         else:
-            # TODO: use torchax.enable_globally()
             if mesh is not None:
                 shard_model(model, mesh)
             else:
-                # Cannot use `to.('jax')`, need to use device_put to replicate the
-                # weight/buffer that are not sharded.
                 with torchax.default_env():
                     model = model.to('jax')
         counter_after_partition = time.perf_counter()
@@ -95,10 +85,7 @@ class TPUModelLoader(DefaultModelLoader):
                     counter_after_partition - counter_before_partition)
 
         if VLLM_TORCHAX_ENABLED:
-            if mesh is not None:
-                self._check_model_is_loaded_torchax(mesh, model)
-            # If torchax is enabled, we return the model directly.
-            # The model is already partitioned and compiled.
+            self._check_model_is_loaded_torchax(mesh, model)
             return model
         # Ensure the model is properly loaded.
         self._check_model_is_loaded(mesh, model)
@@ -113,15 +100,13 @@ class TPUModelLoader(DefaultModelLoader):
         return model
 
     def _check_model_is_loaded_torchax(self, mesh, model: nn.Module) -> None:
-        num_devices = mesh.size
+        num_devices = mesh.size if mesh is not None else 1
         # Check parameters
-        for name, param in model.named_parameters():
-            # logger.info("weight %s: %s %s %s", name, param.shape, param.dtype,
-            #             param)
+        for _, param in model.named_parameters():
             jax_t = param.data.jax()
             assert len(jax_t.global_shards) == num_devices
 
-        for name, buffer in model.named_buffers():
+        for _, buffer in model.named_buffers():
             jax_t = buffer.jax()
             assert len(jax_t.global_shards) == num_devices
 

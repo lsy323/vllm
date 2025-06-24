@@ -4,6 +4,9 @@ import functools
 import jax
 import numpy as np
 import torch
+from jax._src.shard_map import shard_map
+from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 from torch.nn.utils import stateless as torch_stateless
 
 try:
@@ -128,12 +131,8 @@ def _ragged_paged_attention_tmp(
     )
 
 
-from jax._src.shard_map import shard_map
-from jax.sharding import Mesh
-from jax.sharding import PartitionSpec as P
-
-
 def get_mesh():
+    # TODO: we should get the mesh from a common function.
     mesh = Mesh(jax.devices(), axis_names=('x', ))
     return mesh
 
