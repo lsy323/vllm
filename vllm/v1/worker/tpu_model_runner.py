@@ -24,10 +24,10 @@ if VLLM_TORCHAX_ENABLED:
     import jax.numpy as jnp
     import torchax
     try:
+        from tpu_commons.distributed.tpu_distributed_utils import (
+            create_torchax_tensor_with_partition_spec)
         from tpu_commons.models.torchax.torchax_wrapper import (
             get_cpu_tensor_from_torchax_tensor, wrap_model, wrap_model_func)
-
-        # TODO: import distributed util from tpu_commons
     except ImportError:
         from vllm.compilation.torchax_wrapper import (
             get_cpu_tensor_from_torchax_tensor, wrap_model, wrap_model_func)

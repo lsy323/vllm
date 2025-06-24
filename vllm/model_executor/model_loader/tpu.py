@@ -10,7 +10,14 @@ import torch_xla.distributed.spmd as xs
 import torchax
 
 from vllm.config import ModelConfig, VllmConfig
-from vllm.distributed.tpu_distributed_utils import get_fqn, shard_model
+
+VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
+if VLLM_TORCHAX_ENABLED:
+    try:
+        from tpu_commons.distributed.tpu_distributed_utils import (get_fqn,
+                                                                   shard_model)
+    except ImportError:
+        from vllm.distributed.tpu_distributed_utils import get_fqn, shard_model
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.utils import (
