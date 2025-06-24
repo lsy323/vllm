@@ -42,6 +42,9 @@ class TPUModelLoader(DefaultModelLoader):
             with target_device:
                 model = initialize_model(vllm_config=vllm_config)
 
+            logger.info(
+                "check rotary embedding device after init %s", model.model.
+                layers[1].self_attn.rotary_emb.cos_sin_cache.device)
             load_format = vllm_config.load_config.load_format
             if load_format != "dummy":
                 weights_to_load = {
@@ -68,6 +71,10 @@ class TPUModelLoader(DefaultModelLoader):
                 logger.info("Use dummy weight during weight loading.")
 
             process_weights_after_loading(model, model_config, target_device)
+
+        logger.info(
+            "check rotary embedding device after post processing %s",
+            model.model.layers[1].self_attn.rotary_emb.cos_sin_cache.device)
 
         counter_before_partition = time.perf_counter()
         model = model.eval()

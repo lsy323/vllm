@@ -13,6 +13,7 @@ try:
 except ImportError:
     TORCHAX_AVAILABLE = False
 
+from vllm import envs
 from vllm.forward_context import set_forward_context
 
 
@@ -128,7 +129,7 @@ def _ragged_paged_attention_tmp(
 
 
 from jax._src.shard_map import shard_map
-from jax.sharding import Mesh, NamedSharding
+from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
 
@@ -171,6 +172,23 @@ def _ragged_paged_attention(
     from torch_xla.experimental.pallas_kernels.ragged_paged_attention_v2 import (
         ragged_paged_attention as ragged_paged_attention_kernel)
 
+    def call_kernel(q, kv_pages, kv_lens, page_indices, cu_q_lens, num_seqs):
+        """Calls the ragged paged attention kernel."""
+        return ragged_paged_attention_kernel(
+            q=q,
+            kv_pages=kv_pages,
+            kv_lens=kv_lens,
+            page_indices=page_indices,
+            cu_q_lens=cu_q_lens,
+            num_seqs=num_seqs,
+            sm_scale=sm_scale,
+            sliding_window=sliding_window,
+            soft_cap=soft_cap,
+            mask_value=mask_value,
+            num_kv_pages_per_block=num_kv_pages_per_block,
+            num_queries_per_block=num_queries_per_block,
+            vmem_limit_bytes=vmem_limit_bytes)
+
     @functools.partial(shard_map,
                        mesh=get_mesh(),
                        in_specs=(P(None, 'x', None), P(None, None,
@@ -181,23 +199,22 @@ def _ragged_paged_attention(
     def wrap_shard_map(q, kv_pages, kv_lens, page_indices, cu_q_lens,
                        num_seqs):
         """Wraps the ragged paged attention kernel for sharding."""
-        return ragged_paged_attention_kernel(
-            q,
-            kv_pages,
-            kv_lens,
-            page_indices,
-            cu_q_lens,
-            num_seqs,
-            sm_scale=sm_scale,
-            sliding_window=sliding_window,
-            soft_cap=soft_cap,
-            mask_value=mask_value,
-            num_kv_pages_per_block=num_kv_pages_per_block,
-            num_queries_per_block=num_queries_per_block,
-            vmem_limit_bytes=vmem_limit_bytes)
+        return call_kernel(q, kv_pages, kv_lens, page_indices, cu_q_lens,
+                           num_seqs)
 
-    return wrap_shard_map(q, kv_pages, kv_lens, page_indices, cu_q_lens,
-                          num_seqs)
+    args = (
+        q,
+        kv_pages,
+        kv_lens,
+        page_indices,
+        cu_q_lens,
+        num_seqs,
+    )
+
+    if envs.VLLM_XLA_USE_SPMD:
+        return wrap_shard_map(*args)
+    else:
+        return call_kernel(*args)
 
 
 ragged_paged_attention = functools.partial(call_jax, _ragged_paged_attention)

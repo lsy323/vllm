@@ -30,7 +30,7 @@ def create_torchax_tensor_with_partition_spec(
         mesh: Optional[Union["xs.Mesh", Mesh]] = None,
         partition_spec: Optional[Tuple] = None) -> torch.Tensor:
     # Validate that if mesh is None, sharding must also be None
-    if mesh is None and partition_spec is not None:
+    if mesh is None and (partition_spec is not None and partition_spec != ()):
         raise ValueError("if mesh is None, sharding must also be None")
 
     if VLLM_TORCHAX_ENABLED:
@@ -307,11 +307,13 @@ def partition_row_parallel_linear(layer: torch.nn.Module,
                                   mesh: xs.Mesh) -> torch.nn.Module:
     assert isinstance(layer, RowParallelLinear)
     if VLLM_TORCHAX_ENABLED:
+
         def shard_output_hook(module, input, output):
             sharding = NamedSharding(mesh, P('x', None))
             new_output = output[0].apply_jax(jax.lax.with_sharding_constraint,
                                              sharding)
             return (new_output, output[1])
+
         # weight_t = layer.weight.data
         # if weight_t.dtype == torch.bfloat16:
         #     jax_t = jnp.array(weight_t.to(torch.float32).numpy()).astype(jnp.bfloat16)
@@ -357,6 +359,14 @@ def replicate_weights_buffers(module: torch.nn.Module, mesh) -> None:
         setattr(module, name, torchax_param)
 
     for name, buffer in module.named_buffers(recurse=False):
+        if isinstance(buffer, torchax.tensor.Tensor):
+            # If the parameter is already a torchax tensor, we can skip
+            # replication.
+            logger.info("parameter %s is already a torchax tensor, skipping",
+                        name)
+            continue
+        logger.info("replicating buffer %s, buffer is on device %s", name,
+                    buffer.device)
         torchax_t = create_torchax_tensor_with_partition_spec(buffer, mesh, ())
         # TODO: handle persistent buffer
         setattr(module, name, torchax_t)
