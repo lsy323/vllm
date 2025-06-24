@@ -34,8 +34,6 @@ if VLLM_TORCHAX_ENABLED:
         from vllm.distributed.tpu_distributed_utils import (
             create_torchax_tensor_with_partition_spec)
 
-from torch.utils import _pytree as pytree
-
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
@@ -74,8 +72,8 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
 from vllm.v1.sample.tpu.metadata import TPUSupportedSamplingMetadata
 from vllm.v1.sample.tpu.sampler import Sampler as TPUSampler
 from vllm.v1.utils import bind_kv_cache
-from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.tpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.utils import (initialize_kv_cache_for_kv_sharing,
                                   sanity_check_mm_encoder_outputs)
 
@@ -156,8 +154,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         self.check_recompilation = envs.VLLM_XLA_CHECK_RECOMPILATION
 
         # SPMD Related
-        # self.use_spmd = envs.VLLM_XLA_USE_SPMD
-        self.use_spmd = True
+        self.use_spmd = envs.VLLM_XLA_USE_SPMD
         self.mesh = None
         if self.use_spmd:
             if not VLLM_TORCHAX_ENABLED:
@@ -427,6 +424,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
+            assert new_req_data.sampling_params is not None,\
+                "Pooling is not supported in TPU yet"
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
 
@@ -436,6 +435,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                 mm_inputs=new_req_data.mm_inputs,
                 mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
+                pooling_params=None,
                 generator=None,
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
@@ -658,8 +658,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         # Do seq parallel
         self.input_ids = self._create_torchax_array(
-            self.input_ids_cpu[:padded_total_num_scheduled_tokens],
-            partition_spec=('x',))
+            self.input_ids_cpu[:padded_total_num_scheduled_tokens])
         # self.position_ids = self.positions_cpu[:
         #                                        padded_total_num_scheduled_tokens].to(
         #                                            self.device)
@@ -953,37 +952,38 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                     positions=self.position_ids,
                     inputs_embeds=inputs_embeds,
                 )
-        hidden_states = self.select_hidden_states(hidden_states,
-                                                  logits_indices)
-        if not VLLM_TORCHAX_EAGER:
-            logits = self.compute_logits_func(self.params_and_buffers,
-                                              hidden_states, None)
-        else:
-            logits = self.compute_logits(hidden_states)
-        tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
-            from_input_batch(self.input_batch, padded_num_reqs, self.device)
-        if scheduler_output.grammar_bitmask is not None:
-            require_struct_decoding, grammar_bitmask_padded, arange = \
-                self.prepare_structured_decoding_input(logits, scheduler_output)
-            logits = self.structured_decode(require_struct_decoding,
-                                            grammar_bitmask_padded, logits,
-                                            arange)
-        selected_token_ids = self.sample_from_logits_func(
-            logits, tpu_sampling_metadata)
-        # NOTE (NickLucche) Use the original logits (before any penalties or
-        # temperature scaling) for the top-k logprobs. We can't enforce it due
-        # to recompilations outside torch.compiled code, so just make sure
-        # `sample_from_logits` does not modify the logits in-place.
-        logprobs = self.gather_logprobs(logits, selected_token_ids) \
-            if tpu_sampling_metadata.logprobs else None
+        with torchax.default_env():
+            hidden_states = self.select_hidden_states(hidden_states,
+                                                      logits_indices)
+            if not VLLM_TORCHAX_EAGER:
+                logits = self.compute_logits_func(self.params_and_buffers,
+                                                  hidden_states, None)
+            else:
+                logits = self.compute_logits(hidden_states)
+            tpu_sampling_metadata = TPUSupportedSamplingMetadata.\
+                from_input_batch(self.input_batch, padded_num_reqs, self.device)
+            if scheduler_output.grammar_bitmask is not None:
+                require_struct_decoding, grammar_bitmask_padded, arange = \
+                    self.prepare_structured_decoding_input(logits, scheduler_output)
+                logits = self.structured_decode(require_struct_decoding,
+                                                grammar_bitmask_padded, logits,
+                                                arange)
+            selected_token_ids = self.sample_from_logits_func(
+                logits, tpu_sampling_metadata)
+            # NOTE (NickLucche) Use the original logits (before any penalties or
+            # temperature scaling) for the top-k logprobs. We can't enforce it due
+            # to recompilations outside torch.compiled code, so just make sure
+            # `sample_from_logits` does not modify the logits in-place.
+            logprobs = self.gather_logprobs(logits, selected_token_ids) \
+                if tpu_sampling_metadata.logprobs else None
 
-        # Remove padding on cpu and keep dynamic op outside of xla graph.
-        if self.use_spmd and VLLM_TORCHAX_ENABLED:
-            selected_token_ids = get_cpu_tensor_from_torchax_tensor(
-                selected_token_ids)
-            selected_token_ids = selected_token_ids[:num_reqs]
-        else:
-            selected_token_ids = selected_token_ids.cpu()[:num_reqs]
+            # Remove padding on cpu and keep dynamic op outside of xla graph.
+            if self.use_spmd and VLLM_TORCHAX_ENABLED:
+                selected_token_ids = get_cpu_tensor_from_torchax_tensor(
+                    selected_token_ids)
+                selected_token_ids = selected_token_ids[:num_reqs]
+            else:
+                selected_token_ids = selected_token_ids.cpu()[:num_reqs]
         logprobs_lists = logprobs.tolists() \
             if tpu_sampling_metadata.logprobs else None
 
@@ -1057,6 +1057,7 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=None,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
+            pooler_output=[],
         )
 
         # Check there are no new graphs compiled - all the graphs should be
@@ -1099,22 +1100,22 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             # Need to explicitly move to jax device, because `model.to('jax')`
             # won't move tensors on python attributes to jax device.
             self.params_and_buffers = {**params, **buffers}
-            if self.mesh is None:
-                # TODO: not needed anymore, since loader should move model to
-                # device already.
-                self.params_and_buffers = pytree.tree_map_only(
-                    torch.Tensor, lambda x: x.to('jax'),
-                    self.params_and_buffers)
-            else:
-                for name, tensor in self.params_and_buffers.items():
-                    # logger.info("name: {}, tensor: {}".format(name, tensor))
-                    # TODO: This should be moved to loader.
-                    if not isinstance(tensor, torchax.tensor.Tensor):
-                        # logger.info("Replicate on all devices")
-                        self.params_and_buffers[name] = \
-                            create_torchax_tensor_with_partition_spec(tensor,
-                                                                      self.mesh,
-                                                                      ())
+            # if self.mesh is None:
+            #     # TODO: not needed anymore, since loader should move model to
+            #     # device already.
+            #     self.params_and_buffers = pytree.tree_map_only(
+            #         torch.Tensor, lambda x: x.to('jax'),
+            #         self.params_and_buffers)
+            # else:
+            for name, tensor in self.params_and_buffers.items():
+                # logger.info("name: {}, tensor: {}".format(name, tensor))
+                # TODO: This should be moved to loader.
+                if not isinstance(tensor, torchax.tensor.Tensor):
+                    # logger.info("Replicate on all devices")
+                    self.params_and_buffers[name] = \
+                        create_torchax_tensor_with_partition_spec(tensor,
+                                                                    self.mesh,
+                                                                    ())
 
             # Create a function for model.forward
             static_forward_context = \
@@ -1221,6 +1222,12 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
         if VLLM_TORCHAX_ENABLED:
             input_args = (input_ids, position_ids)
+            for k, v in self.params_and_buffers.items():
+                if not isinstance(v, torchax.tensor.Tensor):
+                    logger.info("key %s is not torchax tensor, ", k)
+            for name, kv_cache in self.kv_caches_dict.items():
+                if not isinstance(kv_cache, torchax.tensor.Tensor):
+                    logger.info("key %s is torchax tensor, ", name)
             out, new_kv_caches = self.model_func(self.params_and_buffers,
                                                  input_args,
                                                  self.kv_caches_dict,
@@ -1620,10 +1627,13 @@ class TPUModelRunner(LoRAModelRunnerMixin):
 
                     tpu_kv_cache = torch.zeros(kv_cache_shape, dtype=dtype)
 
-                    if self.use_spmd and VLLM_TORCHAX_ENABLED:
-                        # Use torchax tensor to support SPMD sharding.
+                    if VLLM_TORCHAX_ENABLED:
+                        partition_spec = None
+                        if self.use_spmd:
+                            partition_spec = (None, None, 'x', None)
+                            # Use torchax tensor to support SPMD sharding.
                         tpu_kv_cache = create_torchax_tensor_with_partition_spec(
-                            tpu_kv_cache, self.mesh, (None, None, 'x', None))
+                            tpu_kv_cache, self.mesh, partition_spec)
 
                     kv_caches[layer_name] = tpu_kv_cache
                 else:

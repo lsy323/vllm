@@ -107,6 +107,11 @@ class TPUWorker:
         if self.model_config.seed is None:
             self.model_config.seed = 0
 
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        self.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
+
     @with_torchax_global
     def init_device(self):
         os.environ["PJRT_DEVICE"] = "TPU"
