@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """A TPU worker class."""
+import copy
 import os
 from typing import Optional
 
@@ -71,7 +72,7 @@ class TPUWorker:
         if self.use_spmd:
             # Under SPMD mode, distributed env is initialized as if there is
             # only one worker/device.
-            self.original_parallel_config = self.parallel_config
+            self.original_parallel_config = copy.deepcopy(self.parallel_config)
             self.parallel_config.tensor_parallel_size = 1
             self.parallel_config.pipeline_parallel_size = 1
             self.parallel_config.world_size = 1
@@ -202,10 +203,10 @@ class TPUWorker:
         # intermediate activations.
         if VLLM_TORCHAX_ENABLED:
             m = jax.devices()[0].memory_stats()
-            total_memory_size = m["bytes_limit"] * len(jax.devices())
-            current_mem = m["bytes_in_use"] * len(jax.devices())
+            total_memory_size = m["bytes_limit"]
+            current_mem = m["bytes_in_use"]
             # TODO: Torchax OOMs if we use the same heuristic as torchxla.
-            profiled = m["peak_bytes_in_use"] * len(jax.devices())
+            profiled = m["peak_bytes_in_use"]
         elif self.use_spmd:
             # This is a workaround for the TPU SPMD mode. The get_memory_info
             # API doesn't work with SPMD mode in PyTorch/XLA.
@@ -231,6 +232,13 @@ class TPUWorker:
         usable_memory_size = int(total_memory_size *
                                  self.cache_config.gpu_memory_utilization)
         tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
+        
+        logger.info("check self.original_parallel_config.world_size: %s",
+                     self.original_parallel_config)
+        logger.info("check self.original_parallel_config.world_size: %s",
+                     self.original_parallel_config.world_size)
+        if self.original_parallel_config is not None:
+            tpu_kv_cache_bytes *= self.original_parallel_config.world_size
 
         return int(tpu_kv_cache_bytes)
 

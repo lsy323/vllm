@@ -10,9 +10,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch_xla.distributed.spmd as xs
 import torchax
-from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from torch.nn import Parameter
+from torchax.ops.mappings import t2j_dtype
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -37,6 +37,23 @@ def check_device_memory_usage():
             f"Device {i}: bytes_in_use : {bytes_to_gb(memory_stats['bytes_in_use'])}, "
             f"peak_bytes_in_use : {bytes_to_gb(memory_stats['peak_bytes_in_use'])}, "
             f"bytes_limit : {bytes_to_gb(memory_stats['bytes_limit'])}")
+
+
+def create_torchax_kv_cache(shape, dtype, mesh, partition_spec) -> torch.Tensor:
+    # This works better than device_put for large tensor allocation.
+    assert VLLM_TORCHAX_ENABLED, \
+        "It's expected that VLLM_TORCHAX_ENABLED is True."
+        
+    jax_dtype = t2j_dtype(dtype)
+    if mesh is None:
+        device = jax.devices()[0]
+    else:
+        sharding = NamedSharding(mesh, P(*partition_spec))
+        device = sharding
+
+    jax_t = jnp.zeros(shape, dtype=jax_dtype, device=device).block_until_ready()
+    torchax_t = torchax.tensor.Tensor(jax_t, torchax.default_env())
+    return torchax_t
 
 
 def create_torchax_tensor_with_partition_spec(
@@ -65,10 +82,7 @@ def create_torchax_tensor_with_partition_spec(
 
     partition_spec = partition_spec or ()
     sharding = NamedSharding(mesh, P(*partition_spec))
-    logger.info("partition_spec: %s", partition_spec)
-    logger.info("check jax_t device: %s, shape: %s, dtype: %s", jax_t.device,
-                jax_t.shape, jax_t.dtype)
-    jax_t = jax.device_put(jax_t, sharding).block_until_ready()
+    jax_t = jax.device_put(jax_t, sharding)
 
     torchax_t = torchax.tensor.Tensor(jax_t, torchax.default_env())
     return torchax_t
