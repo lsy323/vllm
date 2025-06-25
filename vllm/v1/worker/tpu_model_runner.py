@@ -25,6 +25,7 @@ if VLLM_TORCHAX_ENABLED:
     import torchax
     try:
         from tpu_commons.distributed.tpu_distributed_utils import (
+            check_device_memory_usage,
             create_torchax_tensor_with_partition_spec)
         from tpu_commons.models.torchax.torchax_wrapper import (
             get_cpu_tensor_from_torchax_tensor, wrap_model, wrap_model_func)
@@ -32,6 +33,7 @@ if VLLM_TORCHAX_ENABLED:
         from vllm.compilation.torchax_wrapper import (
             get_cpu_tensor_from_torchax_tensor, wrap_model, wrap_model_func)
         from vllm.distributed.tpu_distributed_utils import (
+            check_device_memory_usage,
             create_torchax_tensor_with_partition_spec)
 
 from vllm.attention.backends.abstract import AttentionType
@@ -1529,6 +1531,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
+        logger.info("before init kv cache")
+        check_device_memory_usage()
         torchax.enable_globally()
         if len(kv_cache_config.kv_cache_groups) > 1:
             raise NotImplementedError(
@@ -1590,6 +1594,8 @@ class TPUModelRunner(LoRAModelRunnerMixin):
                             # Use torchax tensor to support SPMD sharding.
                         tpu_kv_cache = create_torchax_tensor_with_partition_spec(
                             tpu_kv_cache, self.mesh, partition_spec)
+                        logger.info("after allocating 1 kv cache")
+                        check_device_memory_usage()
 
                     kv_caches[layer_name] = tpu_kv_cache
                 else:
@@ -1618,12 +1624,6 @@ class TPUModelRunner(LoRAModelRunnerMixin):
         )
         self.kv_caches_dict = kv_caches
         torchax.disable_globally()
-
-        if self.use_spmd and not VLLM_TORCHAX_ENABLED:
-            # Shard KV Cache
-            for cache in self.kv_caches:
-                cache = cache.to('xla')
-                xs.mark_sharding(cache, self.mesh, (None, 'x', None, None))
 
     def reset_dynamo_cache(self):
         if self.is_multimodal_model:

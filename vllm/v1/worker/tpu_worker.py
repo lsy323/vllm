@@ -13,6 +13,12 @@ import vllm.envs as envs
 VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
 if VLLM_TORCHAX_ENABLED:
     import jax
+    try:
+        from tpu_commons.distributed.tpu_distributed_utils import (
+            check_device_memory_usage)
+    except ImportError:
+        from vllm.distributed.tpu_distributed_utils import (
+            check_device_memory_usage)
 
 import torch_xla.core.xla_model as xm
 import torch_xla.debug.profiler as xp
@@ -184,29 +190,22 @@ class TPUWorker:
 
     @with_torchax_global
     def determine_available_memory(self) -> int:
+        logger.info("before profiling run")
+        check_device_memory_usage()
         # `max_num_tokens >= max_num_batched_tokens` due to padding.
         with self.model_runner.maybe_setup_dummy_loras(self.lora_config):
             self.model_runner.profile_run(self.model_runner.max_num_tokens)
 
-        # Synchronize before measuring the memory usage.
-        xm.wait_device_ops()
-
-        # During the profiling run, the model runs without KV cache. After
-        # the profiling run, the model always runs with KV cache. Here we clear
-        # the dynamo cache and cached bytecode to ensure the model always has
-        # one compiled bytecode. Having one FX graph/cached bytecode per
-        # compiled model is required for `support_torch_compile` decorator to
-        # skip dynamo guard.
-        self.model_runner.reset_dynamo_cache()
-
+        logger.info("after profiling run")
+        check_device_memory_usage()
         # Get the maximum amount of memory used by the model weights and
         # intermediate activations.
         if VLLM_TORCHAX_ENABLED:
-            m = jax.local_devices()[0].memory_stats()
-            total_memory_size = m["bytes_limit"]
-            current_mem = m["bytes_in_use"]
+            m = jax.devices()[0].memory_stats()
+            total_memory_size = m["bytes_limit"] * len(jax.devices())
+            current_mem = m["bytes_in_use"] * len(jax.devices())
             # TODO: Torchax OOMs if we use the same heuristic as torchxla.
-            profiled = m["peak_bytes_in_use"]
+            profiled = m["peak_bytes_in_use"] * len(jax.devices())
         elif self.use_spmd:
             # This is a workaround for the TPU SPMD mode. The get_memory_info
             # API doesn't work with SPMD mode in PyTorch/XLA.

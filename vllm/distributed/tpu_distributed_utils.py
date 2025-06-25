@@ -25,6 +25,20 @@ logger = init_logger(__name__)
 VLLM_TORCHAX_ENABLED = os.environ.get('VLLM_TORCHAX_ENABLED', '0') == '1'
 
 
+def check_device_memory_usage():
+    devices = jax.devices()
+
+    def bytes_to_gb(bytes):
+        return bytes / (1024**3)
+
+    for i, device in enumerate(devices):
+        memory_stats = device.memory_stats()
+        logger.info(
+            f"Device {i}: bytes_in_use : {bytes_to_gb(memory_stats['bytes_in_use'])}, "
+            f"peak_bytes_in_use : {bytes_to_gb(memory_stats['peak_bytes_in_use'])}, "
+            f"bytes_limit : {bytes_to_gb(memory_stats['bytes_limit'])}")
+
+
 def create_torchax_tensor_with_partition_spec(
         weight_t: torch.Tensor,
         mesh: Optional[Union["xs.Mesh", Mesh]] = None,
@@ -51,8 +65,10 @@ def create_torchax_tensor_with_partition_spec(
 
     partition_spec = partition_spec or ()
     sharding = NamedSharding(mesh, P(*partition_spec))
-
-    jax_t = jax.device_put(jax_t, sharding)
+    logger.info("partition_spec: %s", partition_spec)
+    logger.info("check jax_t device: %s, shape: %s, dtype: %s", jax_t.device,
+                jax_t.shape, jax_t.dtype)
+    jax_t = jax.device_put(jax_t, sharding).block_until_ready()
 
     torchax_t = torchax.tensor.Tensor(jax_t, torchax.default_env())
     return torchax_t
